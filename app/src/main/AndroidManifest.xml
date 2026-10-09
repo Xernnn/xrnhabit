@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Phase A: foreground-app detection baseline (Option C, brainstorm §4.1) -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+    <!-- Phase A: the block screen is drawn as an overlay (brainstorm §4.3) -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.QUERY_ADVANCED_PROTECTION_MODE" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+
+    <!-- Link to xrnloops, our Loop Habit Tracker fork (../xrnloops). The Loop build declares the same
+         signature permission, so either app can be installed first; both need the same key. -->
+    <permission
+        android:name="com.xern.xrnhabit.permission.HABITS"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="com.xern.xrnhabit.permission.HABITS" />
+
+    <application
+        android:name=".XrnhabitApp"
+        android:allowBackup="false"
+        android:icon="@drawable/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Xrnhabit">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:screenOrientation="portrait"
+            android:theme="@style/Theme.Xrnhabit">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Full-screen fallback for the block screen when the overlay path is unavailable. -->
+        <activity
+            android:name=".block.BlockScreenActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:screenOrientation="portrait"
+            android:theme="@style/Theme.Xrnhabit" />
+
+        <service
+            android:name=".block.BlockerForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Enforces user-configured self-control app blocks; must run continuously to detect the foreground app and (re)apply the block screen after reboot or process death." />
+        </service>
+
+        <receiver
+            android:name=".block.BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Loop pushes this after every habit change; only our Loop build can send it. -->
+        <receiver
+            android:name=".loop.LoopChangedReceiver"
+            android:exported="true"
+            android:permission="com.xern.xrnhabit.permission.HABITS">
+            <intent-filter>
+                <action android:name="com.xern.xrnhabit.action.HABITS_CHANGED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

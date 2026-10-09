@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <!-- Minimal set: enough to block uninstall while active. Deactivation is gated by a
+             password prompt in the app (brainstorm §4.5). -->
+        <force-lock />
+        <watch-login />
+    </uses-policies>
+</device-admin>

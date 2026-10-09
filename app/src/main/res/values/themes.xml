@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose owns the real theming (see ui/Theme.kt). This is just the launch/system shell:
+         a plain surface, no action bar, so there is no flash of styled chrome before Compose.
+         A matching dark variant lives in values-night/. -->
+    <style name="Theme.Xrnhabit" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#FBFAF8</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>

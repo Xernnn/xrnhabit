@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <!-- Only present in the `sideload` flavor of :app. Highest Play-rejection risk item in
+             the design, hence its own module (brainstorm §2.2 / §4.5). -->
+        <receiver
+            android:name=".HabitDeviceAdminReceiver"
+            android:description="@string/hardcore_device_admin_description"
+            android:label="@string/hardcore_device_admin_label"
+            android:permission="android.permission.BIND_DEVICE_ADMIN"
+            android:exported="true">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/hardcore_device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

@@ -1,0 +1,30 @@
+# Gradle / Kotlin build output and caches
+.gradle/
+build/
+.kotlin/
+.externalNativeBuild/
+.cxx/
+captures/
+
+# Machine-specific: Android SDK location
+local.properties
+
+# Built apps and signing keys
+*.apk
+*.aab
+*.jks
+*.keystore
+
+# Secrets, logs, heap dumps
+.env
+.env.*
+*.log
+*.hprof
+
+# IDE / editor / OS
+.idea/
+*.iml
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="web_a11y_label">xrnhabit — websites</string>
+    <string name="web_a11y_description">Reads only the address bar of your web browser, so xrnhabit can count time per website and block the sites you choose. Nothing is sent anywhere — it stays on this phone.</string>
+</resources>
