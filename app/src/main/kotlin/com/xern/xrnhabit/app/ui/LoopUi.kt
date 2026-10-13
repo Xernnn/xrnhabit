@@ -1,6 +1,7 @@
 package com.xern.xrnhabit.app.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -14,6 +15,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -109,9 +111,24 @@ fun LoopHabitPickerDialog(
     )
 }
 
-/** A Loop-linked row in a checklist editor: no checkbox to tick, since only Loop can (I23). */
+/**
+ * A Loop-linked row in a checklist editor: no checkbox to tick, since only Loop can (I23). The
+ * chips change what counts: "Yesterday" for habits ticked at the end of the day, "Goal days" for
+ * habits that aren't every day ("3 times a week"), where a day counts once Loop says the goal is
+ * met. Without the change callbacks the choices are only described.
+ */
 @Composable
-fun LoopLinkedRow(name: String, done: Boolean?, onRemove: (() -> Unit)?) {
+fun LoopLinkedRow(
+    name: String,
+    done: Boolean?,
+    yesterday: Boolean,
+    onYesterdayChange: ((Boolean) -> Unit)?,
+    /** Null hides the goal choice: for an every-day habit "goal met" and "ticked" are the same. */
+    goal: Boolean?,
+    onGoalChange: ((Boolean) -> Unit)?,
+    onRemove: (() -> Unit)?,
+) {
+    val day = if (yesterday) "yesterday" else "today"
     Row(
         Modifier.fillMaxWidth().padding(vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -125,14 +142,34 @@ fun LoopLinkedRow(name: String, done: Boolean?, onRemove: (() -> Unit)?) {
         Column(Modifier.weight(1f)) {
             Text(name, style = MaterialTheme.typography.bodyLarge)
             Text(
-                when (done) {
-                    true -> "Done in xrnloops today"
-                    false -> "xrnloops habit · tick it there"
-                    null -> "xrnloops habit"
+                when {
+                    done == true -> if (goal == true) "Goal met in xrnloops $day" else "Done in xrnloops $day"
+                    goal == true -> "xrnloops habit · counts when its goal is met $day"
+                    done == false && yesterday -> "xrnloops habit · needs yesterday's tick"
+                    done == false -> "xrnloops habit · tick it there"
+                    else -> "xrnloops habit · $day's tick counts"
                 },
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            if (onYesterdayChange != null || (goal != null && onGoalChange != null)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (onYesterdayChange != null) {
+                        FilterChip(
+                            selected = yesterday,
+                            onClick = { onYesterdayChange(!yesterday) },
+                            label = { Text("Yesterday") },
+                        )
+                    }
+                    if (goal != null && onGoalChange != null) {
+                        FilterChip(
+                            selected = goal,
+                            onClick = { onGoalChange(!goal) },
+                            label = { Text("Goal days") },
+                        )
+                    }
+                }
+            }
         }
         if (onRemove != null) {
             IconButton(onClick = onRemove) {

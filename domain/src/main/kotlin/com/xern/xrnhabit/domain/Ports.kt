@@ -79,7 +79,7 @@ data class Outcome(
 
 /**
  * Canonical order for applying an [Outcome]: persist, then shield, then side effects.
- * This ordering is invariant I7 and is exercised by `i07_persistBeforeShield`.
+ * This ordering is invariant I7 and is exercised by `i07_persistHappensBeforeShield`.
  */
 fun applyOutcome(
     outcome: Outcome,

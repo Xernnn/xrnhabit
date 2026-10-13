@@ -17,12 +17,17 @@ interface HardcoreGuard {
     /** True once a password is set *and* device admin is active — i.e. the guard does anything. */
     fun isEngaged(): Boolean
 
-    /** True if [pkg] is the system Settings app and some HARDCORE block in [world] is still armed. */
+    /** True if [pkg] is system Settings (or an OEM security app) and some HARDCORE block in [world] is still armed. */
     fun shouldIntercept(pkg: String?, world: World): Boolean
 
     fun hasPassword(): Boolean
+
+    /** Sets the first password; [changePassword] replaces it later. */
     fun setPassword(password: String)
     fun verifyPassword(input: String): Boolean
+
+    /** Replaces the password if [current] is right; there is deliberately no way to remove it. */
+    fun changePassword(current: String, new: String): Boolean
 
     fun isDeviceAdminActive(): Boolean
     fun requestDeviceAdmin(activity: Activity)
@@ -35,6 +40,7 @@ object NoopHardcoreGuard : HardcoreGuard {
     override fun hasPassword() = false
     override fun setPassword(password: String) = Unit
     override fun verifyPassword(input: String) = false
+    override fun changePassword(current: String, new: String) = false
     override fun isDeviceAdminActive() = false
     override fun requestDeviceAdmin(activity: Activity) = Unit
 }

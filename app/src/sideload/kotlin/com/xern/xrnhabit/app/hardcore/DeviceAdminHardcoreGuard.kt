@@ -30,13 +30,19 @@ class DeviceAdminHardcoreGuard(private val context: Context) : HardcoreGuard {
     override fun isEngaged(): Boolean = hasPassword() && isDeviceAdminActive()
 
     override fun shouldIntercept(pkg: String?, world: World): Boolean {
-        if (!isEngaged() || pkg != SETTINGS_PACKAGE) return false
+        if (!isEngaged() || pkg !in GUARDED_PACKAGES) return false
         return world.blocks.any {
             it.enforcementTier == EnforcementTier.HARDCORE && it.state != BlockState.UNLOCKED
         }
     }
 
     override fun hasPassword(): Boolean = prefs.contains(KEY_HASH)
+
+    override fun changePassword(current: String, new: String): Boolean {
+        if (!verifyPassword(current)) return false
+        setPassword(new)
+        return true
+    }
 
     override fun setPassword(password: String) {
         val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
@@ -75,7 +81,23 @@ class DeviceAdminHardcoreGuard(private val context: Context) : HardcoreGuard {
     companion object {
         private const val KEY_SALT = "salt"
         private const val KEY_HASH = "hash"
-        private const val SETTINGS_PACKAGE = "com.android.settings"
+
+        /**
+         * System Settings, plus the OEM "security" apps that can also force-stop xrnhabit or
+         * switch off its permissions (MIUI's Security app is the one on the test phone).
+         */
+        private val GUARDED_PACKAGES = setOf(
+            "com.android.settings",
+            "com.miui.securitycenter",
+            "com.coloros.safecenter",
+            "com.oplus.safecenter",
+            "com.huawei.systemmanager",
+            "com.iqoo.secure",
+            "com.vivo.permissionmanager",
+            "com.oneplus.security",
+            "com.samsung.android.lool",
+            "com.samsung.android.sm.devicesecurity",
+        )
     }
 }
 

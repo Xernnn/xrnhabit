@@ -42,15 +42,6 @@
             </intent-filter>
         </activity>
 
-        <!-- Full-screen fallback for the block screen when the overlay path is unavailable. -->
-        <activity
-            android:name=".block.BlockScreenActivity"
-            android:exported="false"
-            android:excludeFromRecents="true"
-            android:launchMode="singleInstance"
-            android:screenOrientation="portrait"
-            android:theme="@style/Theme.Xrnhabit" />
-
         <service
             android:name=".block.BlockerForegroundService"
             android:exported="false"
@@ -69,6 +60,18 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <!-- Quick Settings: start the lockdown blocks without opening the app. -->
+        <service
+            android:name=".block.LockdownTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile_lock"
+            android:label="Lock down"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
 
         <!-- Loop pushes this after every habit change; only our Loop build can send it. -->
         <receiver

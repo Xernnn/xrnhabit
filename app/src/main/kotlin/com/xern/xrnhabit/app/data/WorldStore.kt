@@ -3,6 +3,7 @@ package com.xern.xrnhabit.app.data
 import com.xern.xrnhabit.domain.BlockEngine
 import com.xern.xrnhabit.domain.BlockEvent
 import com.xern.xrnhabit.domain.Clock
+import com.xern.xrnhabit.domain.Effect
 import com.xern.xrnhabit.domain.PersistPort
 import com.xern.xrnhabit.domain.ShieldPlan
 import com.xern.xrnhabit.domain.ShieldPort
@@ -10,8 +11,11 @@ import com.xern.xrnhabit.domain.Telemetry
 import com.xern.xrnhabit.domain.World
 import com.xern.xrnhabit.domain.applyOutcome
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -37,12 +41,21 @@ class WorldStore(
 
     private val mutex = Mutex()
 
+    private val _effects = MutableSharedFlow<Effect>(extraBufferCapacity = 32)
+
+    /**
+     * The engine's side effects, after [applyOutcome] has handled the telemetry ones. The service
+     * turns the rest (unlock ending soon, tamper, a refused redeem) into notifications.
+     */
+    val effects: SharedFlow<Effect> = _effects.asSharedFlow()
+
     fun dispatch(event: BlockEvent) {
         scope.launch {
             mutex.withLock {
                 val outcome = engine.reduce(_world.value, event, clock)
                 applyOutcome(outcome, persist, shield, telemetry, clock.nowWallMs())
                 _world.value = outcome.world
+                outcome.effects.forEach { _effects.tryEmit(it) }
             }
         }
     }

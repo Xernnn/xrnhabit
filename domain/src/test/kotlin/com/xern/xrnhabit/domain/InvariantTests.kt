@@ -188,6 +188,7 @@ class InvariantTests {
 
         assertEquals(BlockState.EARNED, out.world.block("c1")!!.state)
         assertTrue(out.effects.any { it is Effect.RedeemRejected && it.reason == RejectReason.CAP_REACHED })
+        assertEquals("the UI can say why before the tap", RejectReason.CAP_REACHED, engine.redeemRejection(earn(world, clock), "c1", clock))
     }
 
     @Test
@@ -491,6 +492,24 @@ class InvariantTests {
     }
 
     @Test
+    fun i20_overnightWindowBelongsToItsStartDay() {
+        val clock = FakeClock() // Thursday 2026-01-15 12:00 UTC
+        val fridayNight = Schedule(setOf(5), TimeWindow(23 * 60, 7 * 60))
+        val block = modeBlock("n1", BlockMode.SCHEDULE, schedule = fridayNight)
+        val world = buildWorld(listOf(block), clock = clock)
+        fun blocked() = engine.isBlocking(world, block, clock)
+
+        clock.advance(14L * 60 * 60_000) // Fri 02:00: Thursday night, not in the schedule
+        assertFalse(blocked())
+        clock.advance(21L * 60 * 60_000 + 30L * 60_000) // Fri 23:30
+        assertTrue(blocked())
+        clock.advance(2L * 60 * 60_000 + 30L * 60_000) // Sat 02:00: still Friday night
+        assertTrue(blocked())
+        clock.advance(5L * 60 * 60_000) // Sat 07:00: window over
+        assertFalse(blocked())
+    }
+
+    @Test
     fun i21_lockdownIgnoresWallClockAndEnds() {
         val clock = FakeClock()
         val block = modeBlock("l1", BlockMode.LOCKDOWN, lockdownMs = 60L * 60_000)
@@ -608,6 +627,36 @@ class InvariantTests {
     }
 
     @Test
+    fun i23_yesterdayItemCountsYesterdaysTick() {
+        val clock = FakeClock()
+        val item = linkedItem("c1", "journal", day = LinkedDay.YESTERDAY)
+        var world = buildWorld(listOf(checklistBlock("c1")), mapOf("c1" to listOf(item)), clock)
+
+        world = sync(world, clock, "journal") // done today only
+        assertFalse(world.items("c1").single().done)
+        assertEquals(BlockState.ARMED, world.block("c1")!!.state)
+
+        val yesterday = BlockEvent.ExternalHabitsSynced(clock.epochDay(), emptySet(), setOf("journal"))
+        world = engine.reduce(world, yesterday, clock).world
+        assertTrue(world.items("c1").single().done)
+        assertEquals(BlockState.EARNED, world.block("c1")!!.state)
+    }
+
+    @Test
+    fun i23_goalItemCountsGoalMetDays() {
+        val clock = FakeClock()
+        val item = linkedItem("c1", "gym").copy(countsGoal = true)
+        var world = buildWorld(listOf(checklistBlock("c1")), mapOf("c1" to listOf(item)), clock)
+
+        world = sync(world, clock, "gym") // ticked today, but the item asks about the goal
+        assertFalse(world.items("c1").single().done)
+
+        val goalMet = BlockEvent.ExternalHabitsSynced(clock.epochDay(), emptySet(), goalMetHabitIds = setOf("gym"))
+        world = engine.reduce(world, goalMet, clock).world
+        assertEquals(BlockState.EARNED, world.block("c1")!!.state)
+    }
+
+    @Test
     fun i23_syncIgnoredUnlessArmed() {
         val clock = FakeClock()
         val checklist = items("c1", 1) + linkedItem("c1", "meditate", order = 1)
@@ -628,9 +677,10 @@ class InvariantTests {
 
         world = sync(world, clock, "meditate")
         assertEquals(BlockState.EARNED, world.block("c1")!!.state)
-        assertEquals(clock.epochDay(), world.items("c1").single().spentEpochDay)
+        assertNull("not spent until redeemed", world.items("c1").single().spentEpochDay)
 
         world = engine.reduce(world, BlockEvent.Redeem("c1"), clock).world
+        assertEquals(clock.epochDay(), world.items("c1").single().spentEpochDay)
         clock.advance(5L * 60_000) // the unlock runs out
         world = engine.reduce(world, BlockEvent.Tick, clock).world
         assertEquals(BlockState.ARMED, world.block("c1")!!.state)
@@ -641,11 +691,29 @@ class InvariantTests {
     }
 
     @Test
+    fun i24_expiredCreditDoesNotSpendTick() {
+        val clock = FakeClock()
+        var world = buildWorld(listOf(checklistBlock("c1")), mapOf("c1" to listOf(linkedItem("c1", "meditate"))), clock)
+        world = sync(world, clock, "meditate")
+        assertEquals(BlockState.EARNED, world.block("c1")!!.state)
+
+        clock.advance(Defaults.CREDIT_TTL_MS) // never redeemed (I1)
+        world = engine.reduce(world, BlockEvent.Tick, clock).world
+        assertEquals(BlockState.ARMED, world.block("c1")!!.state)
+        assertNull(world.items("c1").single().spentEpochDay)
+
+        world = sync(world, clock, "meditate")
+        assertEquals("the unused tick earns again", BlockState.EARNED, world.block("c1")!!.state)
+    }
+
+    @Test
     fun i24_nextDaySameHabitCanEarnAgain() {
         val clock = FakeClock() // 12:00 UTC
         var world = buildWorld(listOf(checklistBlock("c1")), mapOf("c1" to listOf(linkedItem("c1", "meditate"))), clock)
         world = sync(world, clock, "meditate")
-        world = engine.reduce(world, BlockEvent.UserResetEarned("c1"), clock).world
+        world = engine.reduce(world, BlockEvent.Redeem("c1"), clock).world
+        clock.advance(5L * 60_000) // the unlock runs out
+        world = engine.reduce(world, BlockEvent.Tick, clock).world
         world = sync(world, clock, "meditate")
         assertEquals("spent for today", BlockState.ARMED, world.block("c1")!!.state)
 
@@ -654,5 +722,58 @@ class InvariantTests {
         world = sync(world, clock, "meditate")
 
         assertEquals(BlockState.EARNED, world.block("c1")!!.state)
+    }
+
+    @Test
+    fun i25_pauseLiftsSoftBlocksOnly() {
+        val clock = FakeClock()
+        val soft = checklistBlock("soft", target = "com.soft")
+        val hard = checklistBlock("hard", target = "com.hard").copy(enforcementTier = EnforcementTier.HARDCORE)
+        val lockdown = modeBlock("lock", BlockMode.LOCKDOWN, targetPackages = setOf("com.lock"), lockdownMs = 60L * 60_000)
+        var world = buildWorld(listOf(soft, hard, lockdown), clock = clock)
+        world = engine.reduce(world, BlockEvent.StartLockdown("lock"), clock).world
+
+        val out = engine.reduce(world, BlockEvent.StartPause(), clock)
+
+        assertEquals(setOf("com.hard", "com.lock"), out.shieldPlan!!.blockedPackages)
+        assertFalse(engine.isBlocking(out.world, soft, clock))
+        assertTrue(engine.isBlocking(out.world, hard, clock))
+    }
+
+    @Test
+    fun i25_pauseEndsAndIsOncePerDay() {
+        val clock = FakeClock()
+        var world = buildWorld(listOf(checklistBlock("c1")), clock = clock)
+        world = engine.reduce(world, BlockEvent.StartPause(), clock).world
+        assertTrue(engine.blockedPackages(world, clock).isEmpty())
+
+        clock.advanceWallOnly(-60L * 60_000) // winding the clock back doesn't stretch it
+        clock.advanceMonoOnly(Defaults.PAUSE_MS)
+        world = engine.reduce(world, BlockEvent.Tick, clock).world
+        assertNull(world.pause)
+        assertEquals(setOf("com.target"), engine.blockedPackages(world, clock))
+
+        clock.advanceWallOnly(60L * 60_000)
+        world = engine.reduce(world, BlockEvent.StartPause(), clock).world
+        assertNull("already had today's break", world.pause)
+
+        clock.advance(24L * 60 * 60_000)
+        world = engine.reduce(world, BlockEvent.StartPause(), clock).world
+        assertNotNull(world.pause)
+        world = engine.reduce(world, BlockEvent.EndPause, clock).world
+        assertEquals(setOf("com.target"), engine.blockedPackages(world, clock))
+    }
+
+    @Test
+    fun i25_pauseSurvivesRebootViaWallDelta() {
+        val clock = FakeClock(mono = 50_000_000)
+        var world = buildWorld(listOf(checklistBlock("c1")), clock = clock)
+        world = engine.reduce(world, BlockEvent.StartPause(), clock).world
+
+        clock.advance(5L * 60_000)
+        clock.setMono(1_000)
+        world = engine.reduce(world, BlockEvent.BootOrColdStart, clock).world
+
+        assertEquals(10L * 60_000, engine.pauseRemainingMs(world, clock))
     }
 }

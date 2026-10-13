@@ -3,7 +3,6 @@ package com.xern.xrnhabit.app
 import android.app.Application
 import com.xern.xrnhabit.app.block.BlockerForegroundService
 import com.xern.xrnhabit.app.block.ServiceWatchdogWorker
-import com.xern.xrnhabit.app.data.AndroidClock
 import com.xern.xrnhabit.app.data.AppContainer
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
@@ -20,7 +19,7 @@ class XrnhabitApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        container = AppContainer(this, AndroidClock())
+        container = AppContainer(this)
         // The engine's core loop lives in the service so it survives the UI being gone.
         BlockerForegroundService.start(this)
         scheduleWatchdog()

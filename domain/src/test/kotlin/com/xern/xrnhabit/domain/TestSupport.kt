@@ -154,8 +154,15 @@ fun items(blockId: String, count: Int, done: Int = 0): List<ChecklistItem> =
     }
 
 /** A checklist item ticked only by the external habit tracker (I23). Id is `"$blockId-$habitId"`. */
-fun linkedItem(blockId: String, habitId: String, order: Int = 0) =
-    ChecklistItem(id = "$blockId-$habitId", blockId = blockId, text = habitId, order = order, externalHabitId = habitId)
+fun linkedItem(blockId: String, habitId: String, order: Int = 0, day: LinkedDay = LinkedDay.TODAY) =
+    ChecklistItem(
+        id = "$blockId-$habitId",
+        blockId = blockId,
+        text = habitId,
+        order = order,
+        externalHabitId = habitId,
+        linkedDay = day,
+    )
 
 fun buildWorld(
     blocks: List<Block>,

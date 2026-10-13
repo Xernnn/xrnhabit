@@ -18,7 +18,8 @@ import com.xern.xrnhabit.domain.World
 
 /**
  * Phase C anti-bypass (brainstorm §4.5): while a HARDCORE block is ARMED/EARNED, intercept the
- * system Settings app itself with a password prompt, so the user can't navigate to
+ * system Settings app itself (and OEM security apps such as MIUI's, which can force-stop apps
+ * and revoke permissions) with a password prompt, so the user can't navigate to
  * Settings > Apps > xrnhabit > Device admin apps and deactivate protection mid-urge.
  *
  * Coarser than the brainstorm's per-screen targeting — this only sees "Settings is in the

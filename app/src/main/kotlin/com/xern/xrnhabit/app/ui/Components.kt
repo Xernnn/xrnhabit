@@ -165,7 +165,6 @@ fun triggerFraction(block: Block, world: World): Float = when (block.trigger.typ
         val timer = timerFraction(block, world)
         if (block.trigger.combineMode == CombineMode.AND) minOf(checklist, timer) else maxOf(checklist, timer)
     }
-    TriggerType.COUNT -> 0f
 }
 
 /** A block's apps and websites at a glance: "Instagram + youtube.com", "Reddit + 2 more". */

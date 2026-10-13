@@ -12,9 +12,17 @@ again on their own. No accounts, no backend; everything stays on the phone.
   there counts.
 - **Daily limits.** N free minutes a day across a block's apps, then blocked until midnight.
 - **Set times.** Block on a weekly schedule, or lock down right now for N minutes.
-- **Hardcore mode** (sideload build). A password gate on Android Settings plus Device Admin
-  anti-uninstall while a hardcore block is active.
-- **Insights.** Per-app screen time and, in the sideload build, per-site time.
+- **Hardcore mode** (sideload build). A password gate on Android Settings (and phone-maker
+  security apps) plus Device Admin anti-uninstall while a hardcore block is active.
+- **Hard to talk yourself out of.** Deleting a block or making one easier takes a 60-second
+  wait (or the hardcore password). One 15-minute break a day pauses soft blocks. Changing the
+  phone's clock by hand doesn't reset limits or move schedules.
+- **Status at a glance.** The notification shows what's open and for how long, warns 30 s
+  before an unlock ends, and says so if blocking stops working. A Quick Settings tile restarts
+  your lockdowns.
+- **Backup.** Export your blocks to a file and import them on a new install.
+- **Insights.** Per-app screen time, habits done, times blocked and your streak, and in the
+  sideload build per-site time.
 - Built to survive reboots, process death and OEM battery killers. Unlock countdowns run on a
   clock that changing the system time doesn't affect.
 

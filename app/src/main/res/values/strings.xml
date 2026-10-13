@@ -3,5 +3,4 @@
     <string name="app_name">xrnhabit</string>
 
     <string name="fgs_notification_title">xrnhabit is on</string>
-    <string name="fgs_notification_text">Watching for blocked apps</string>
 </resources>

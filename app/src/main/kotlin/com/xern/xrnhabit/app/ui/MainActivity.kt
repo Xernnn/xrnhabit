@@ -17,7 +17,9 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -90,32 +92,54 @@ class MainActivity : ComponentActivity() {
                             BlocksScreen(
                                 world,
                                 store,
+                                guard = hardcoreGuard,
                                 onOpenBlock = { nav.navigate("block/$it") },
                                 onCreateBlock = { nav.navigate("createBlock") },
                                 onOpenSettings = { nav.navigate(Tab.Settings.route) },
                             )
                         }
-                        composable(Tab.Insights.route) { InsightsScreen(world, container.websites, container.siteUsage) }
+                        composable(Tab.Insights.route) {
+                            InsightsScreen(world, container.websites, container.siteUsage, container.telemetry)
+                        }
                         composable(Tab.Settings.route) {
-                            SettingsScreen(world, store, hardcoreGuard, container.websites, container.loop)
+                            SettingsScreen(world, store, hardcoreGuard, container.websites, container.loop, container.clockGuard)
                         }
                         composable("createBlock") {
                             CreateBlockScreen(
                                 store = store,
                                 websites = container.websites,
                                 loop = container.loop,
+                                guard = hardcoreGuard,
                                 onDone = { nav.popBackStack() },
                             )
                         }
                         composable("block/{id}") { entry ->
+                            val id = entry.arguments?.getString("id").orEmpty()
                             BlockDetailScreen(
                                 world = world,
                                 store = store,
-                                blockId = entry.arguments?.getString("id").orEmpty(),
+                                blockId = id,
                                 onBack = { nav.popBackStack() },
+                                onEdit = { nav.navigate("block/$id/edit") },
                                 guard = hardcoreGuard,
                                 loop = container.loop,
                             )
+                        }
+                        composable("block/{id}/edit") { entry ->
+                            // Read once: the form edits a copy, and a tick mustn't reset it.
+                            val existing = remember { world.block(entry.arguments?.getString("id").orEmpty()) }
+                            if (existing == null) {
+                                LaunchedEffect(Unit) { nav.popBackStack() }
+                            } else {
+                                CreateBlockScreen(
+                                    store = store,
+                                    websites = container.websites,
+                                    loop = container.loop,
+                                    guard = hardcoreGuard,
+                                    onDone = { nav.popBackStack() },
+                                    existing = existing,
+                                )
+                            }
                         }
                     }
                 }

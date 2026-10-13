@@ -32,6 +32,7 @@ import com.xern.xrnhabit.domain.BlockEvent
 import com.xern.xrnhabit.domain.BlockMode
 import com.xern.xrnhabit.domain.BlockState
 import com.xern.xrnhabit.domain.ChecklistItem
+import com.xern.xrnhabit.domain.RejectReason
 import com.xern.xrnhabit.domain.ShieldPlan
 import com.xern.xrnhabit.domain.ShieldPort
 import com.xern.xrnhabit.domain.Sites
@@ -98,10 +99,19 @@ class OverlayShieldPort(
                 ?.takeIf { it.isNotEmpty() }
                 ?.joinToString(" or ") { appLabel(it) },
             freeAtWall = block?.let { freeAtWall(it, world, engine, clock) },
+            freeInMs = block?.let { freeAtWall(it, world, engine, clock) }?.let { it - clock.nowWallMs() },
             allowanceMs = block?.takeIf { it.mode == BlockMode.ALLOWANCE }?.dailyAllowanceMs,
+            timerMs = block?.let { world.progress[it.id]?.accumulatedMs } ?: 0,
+            timerRunning = block?.let { world.progress[it.id]?.timerRunning } == true,
+            redeemRejection = block?.takeIf { it.state == BlockState.EARNED }?.let { engine.redeemRejection(world, it.id, clock) },
+            unlockUsedTodayMs = engine.unlockUsedTodayMs(world, clock),
+            dailyCapMs = world.settings.dailyCapMs,
         )
         // If the OS dropped our window out from under us, rebuild it.
         if (view != null && view?.isAttachedToWindow != true) hide()
+        // Hitting the shield re-reads Loop, so a missed push or a credit that lapsed unused (I24)
+        // is caught now rather than at the next screen unlock.
+        if (view == null && uiState.value?.items?.any { it.externalHabitId != null } == true) loop.sync()
         show(focusable = !siteBlocked)
     }
 
@@ -131,13 +141,15 @@ class OverlayShieldPort(
 
         val owner = OverlayWindowOwner().also { it.onCreate() }
         // Opening Loop moves the foreground off the blocked app, which drops the overlay.
-        val openLoop = loop.launchIntent()?.let { intent -> { runCatching { context.startActivity(intent) }; Unit } }
+        val openLoop: ((String) -> Unit)? = loop.launchIntent()?.let {
+            { uuid -> loop.openHabitIntent(uuid)?.let { runCatching { context.startActivity(it) } }; Unit }
+        }
         val composeView = ComposeView(context).apply {
             setContent {
                 BlockOverlayContent(
                     ui = uiState.value,
                     onToggleItem = { id, done -> onEvent(BlockEvent.ToggleChecklistItem(id, done)) },
-                    onStartTimer = { blockId -> onEvent(BlockEvent.TimerControl(blockId, running = true)) },
+                    onSetTimer = { blockId, running -> onEvent(BlockEvent.TimerControl(blockId, running)) },
                     onRedeem = { blockId -> onEvent(BlockEvent.Redeem(blockId)) },
                     onLeave = { leave(uiState.value?.isSite == true) },
                     onOpenLoop = openLoop,
@@ -212,8 +224,17 @@ class OverlayShieldPort(
         val habitAppLabel: String? = null,
         /** Non-HABIT blocks: when the block lets go (wall ms), if known. */
         val freeAtWall: Long? = null,
+        /** The same, as time from now. */
+        val freeInMs: Long? = null,
         /** ALLOWANCE blocks: the daily allowance that has been used up. */
         val allowanceMs: Long? = null,
+        /** TIMER / COMBINED: time counted so far, and whether the timer is running. */
+        val timerMs: Long = 0,
+        val timerRunning: Boolean = false,
+        /** EARNED blocks: why "Open" wouldn't go through right now, if it wouldn't (I9). */
+        val redeemRejection: RejectReason? = null,
+        val unlockUsedTodayMs: Long = 0,
+        val dailyCapMs: Long = 0,
     )
 }
 
