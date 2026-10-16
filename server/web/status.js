@@ -296,7 +296,7 @@ function render() {
         h("div", {}, h("b", {}, breakText), h("span", {}, "15-minute break")),
         h("div", {}, h("b", {}, blocks.length), h("span", {}, blocks.length === 1 ? "Block" : "Blocks"))),
       devicesCard(now),
-      blocks.length ? cards : h("div", { class: "card empty" }, "No blocks yet. Set them up in xrnhabit on the phone; they show up here after its next sync."),
+      blocks.length ? cards : h("div", { class: "card empty" }, "No blocks yet. Make them in xrnhabit on the phone or on the laptop page; they show up here after the next sync."),
       h("div", { class: "foot" },
         h("span", {}, updatedText),
         h("a", { href: "#", onclick: (e) => { e.preventDefault(); signOut(""); } }, "Sign out"))));
