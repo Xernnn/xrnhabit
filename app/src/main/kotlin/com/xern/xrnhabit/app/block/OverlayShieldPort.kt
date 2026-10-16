@@ -38,6 +38,9 @@ import com.xern.xrnhabit.domain.ShieldPlan
 import com.xern.xrnhabit.domain.ShieldPort
 import com.xern.xrnhabit.domain.Sites
 import com.xern.xrnhabit.domain.World
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * The enforcement surface (brainstorm §4.3): a `TYPE_APPLICATION_OVERLAY` window rather than a
@@ -68,6 +71,14 @@ class OverlayShieldPort(
 
     private var view: View? = null
     private var params: WindowManager.LayoutParams? = null
+
+    private val _visible = MutableStateFlow(false)
+
+    /** Whether a block screen is up; the service syncs faster while it is. */
+    val visible: StateFlow<Boolean> = _visible.asStateFlow()
+
+    /** Whether the block screen shows an item ticked in xrnloops. */
+    val showsLinkedItem: Boolean get() = uiState.value?.items?.any { it.externalHabitId != null } == true
     private var windowOwner: OverlayWindowOwner? = null
     private val uiState = mutableStateOf<OverlayUi?>(null)
 
@@ -113,7 +124,7 @@ class OverlayShieldPort(
         if (view != null && view?.isAttachedToWindow != true) hide()
         // Hitting the shield re-reads Loop, so a missed push or a credit that lapsed unused (I24)
         // is caught now rather than at the next screen unlock.
-        if (view == null && uiState.value?.items?.any { it.externalHabitId != null } == true) loop.sync()
+        if (view == null && showsLinkedItem) loop.sync()
         // Likewise the laptop: an unlock redeemed there lifts this shield a moment later.
         if (view == null) shared.request()
         show(focusable = !siteBlocked)
@@ -193,6 +204,7 @@ class OverlayShieldPort(
 
         runCatching { wm.addView(host, layout) }
         view = host
+        _visible.value = true
         params = layout
         windowOwner = owner
         owner.onStart()
@@ -201,6 +213,7 @@ class OverlayShieldPort(
     private fun hide() {
         view?.let { v -> runCatching { wm.removeView(v) } }
         view = null
+        _visible.value = false
         params = null
         windowOwner?.onDestroy()
         windowOwner = null

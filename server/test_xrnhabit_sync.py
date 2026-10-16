@@ -105,6 +105,50 @@ class SyncServerTest(unittest.TestCase):
         with urllib.request.urlopen(self.base + "/") as r:
             self.assertIn("status", r.read().decode())
 
+    def test_wrong_passwords_lock_out_that_address_only(self):
+        guesser = {"X-Forwarded-For": "203.0.113.9"}  # as Funnel's proxy passes it on
+        for _ in range(srv.FAIL_LIMIT):
+            self.assertEqual(401, self.call("GET", "/state", password="nope", headers=guesser)[0])
+        # Locked out now, even with the right password; everyone else isn't.
+        self.assertEqual(429, self.call("GET", "/state", headers=guesser)[0])
+        self.assertEqual(200, self.call("GET", "/state", headers={"X-Forwarded-For": "203.0.113.10"})[0])
+
+    def test_a_right_password_clears_earlier_mistakes(self):
+        typo = {"X-Forwarded-For": "203.0.113.20"}
+        for _ in range(srv.FAIL_LIMIT - 1):
+            self.call("GET", "/state", password="nope", headers=typo)
+        self.assertEqual(200, self.call("GET", "/state", headers=typo)[0])
+        self.assertEqual(401, self.call("GET", "/state", password="nope", headers=typo)[0])
+        self.assertEqual(200, self.call("GET", "/state", headers=typo)[0])
+
+    def test_devices_report_when_each_last_checked_in(self):
+        before = int(time.time() * 1000)
+        self.call("GET", "/state", headers={"X-Device": "phone"})
+        status, body, _ = self.call("GET", "/xrnhabit/devices")
+        self.assertEqual(200, status)
+        seen = json.loads(body)
+        self.assertGreaterEqual(seen["phone"], before)
+        self.assertNotIn("", seen)  # the status page itself sends no X-Device
+        self.assertTrue(os.path.isfile(srv.devices_path("sonn")))
+
+    def test_events_are_kept_once_and_read_back_by_time(self):
+        now = int(time.time() * 1000)
+        batch = {"events": [
+            {"t": "blocked", "at": now - 5000, "target": "com.example.game", "name": "Game"},
+            {"t": "unlock", "at": now - 1000, "block": "b1", "ms": 300000},
+            {"t": "nonsense", "at": now},  # dropped
+        ]}
+        status, body, _ = self.call("POST", "/events", batch, {"X-Device": "phone"})
+        self.assertEqual((200, 2), (status, json.loads(body)["added"]))
+        # A resend (the reply got lost) adds nothing; the same event from another device does.
+        self.assertEqual(0, json.loads(self.call("POST", "/events", batch, {"X-Device": "phone"})[1])["added"])
+        self.assertEqual(2, json.loads(self.call("POST", "/events", batch, {"X-Device": "laptop"})[1])["added"])
+        self.assertEqual(400, self.call("POST", "/events", batch)[0])  # no X-Device
+        _, body, _ = self.call("GET", f"/events?since={now - 2000}")
+        got = json.loads(body)["events"]
+        self.assertEqual([("laptop", "unlock", 300000), ("phone", "unlock", 300000)],
+                         sorted((e["d"], e["t"], e["ms"]) for e in got))
+
 
 if __name__ == "__main__":
     unittest.main()

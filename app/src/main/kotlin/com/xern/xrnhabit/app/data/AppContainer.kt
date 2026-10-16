@@ -46,7 +46,7 @@ class AppContainer(context: Context) {
     val loop = LoopHabits(context, store, appScope)
 
     /** Unlocks, breaks and blocks shared with the laptop through the home server (contract §2.4). */
-    val shared = SharedSync(context, store, appScope)
+    val shared = SharedSync(context, store, telemetry, appScope)
 
     init {
         // This install's name in the shared state (whose allowance use is whose, §2.4).

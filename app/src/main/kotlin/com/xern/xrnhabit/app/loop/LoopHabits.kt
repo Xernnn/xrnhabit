@@ -35,6 +35,10 @@ object LoopContract {
 
     /** `call(AUTHORITY, METHOD_SYNC)`: xrnloops syncs with the home server first (a few seconds at most). */
     const val METHOD_SYNC = "sync"
+
+    /** In [METHOD_SYNC]'s result: sync is set up in xrnloops, and this attempt worked. */
+    const val KEY_CONFIGURED = "configured"
+    const val KEY_SYNCED = "synced"
     const val PARAM_DATE = "date"
     const val COLUMN_UUID = "uuid"
     const val COLUMN_NAME = "name"
@@ -85,6 +89,10 @@ class LoopHabits(
     /** The last sync attempt; null until one has run (nothing linked yet, or just started). */
     val lastSync: StateFlow<LoopSync?> = _lastSync.asStateFlow()
 
+    /** When xrnloops' own sync with the home server started failing, for an alert; null while it works. */
+    private val _serverFailingSince = MutableStateFlow<Long?>(null)
+    val serverFailingSince: StateFlow<Long?> = _serverFailingSince.asStateFlow()
+
     fun status(): LoopStatus = when {
         !isInstalled() -> LoopStatus.NOT_INSTALLED
         context.checkSelfPermission(LoopContract.PERMISSION) != PackageManager.PERMISSION_GRANTED -> LoopStatus.NO_ACCESS
@@ -127,7 +135,10 @@ class LoopHabits(
     private fun pullFromServer() {
         if (status() != LoopStatus.READY) return
         val uri = Uri.Builder().scheme("content").authority(LoopContract.AUTHORITY).build()
-        runCatching { context.contentResolver.call(uri, LoopContract.METHOD_SYNC, null, null) }
+        val result = runCatching { context.contentResolver.call(uri, LoopContract.METHOD_SYNC, null, null) }.getOrNull()
+        val configured = result?.getBoolean(LoopContract.KEY_CONFIGURED) == true
+        val synced = result?.getBoolean(LoopContract.KEY_SYNCED) == true
+        _serverFailingSince.value = if (!configured || synced) null else _serverFailingSince.value ?: System.currentTimeMillis()
     }
 
     private fun readOnce(date: LocalDate): List<LoopHabit>? {

@@ -26,7 +26,8 @@ fun main() = runBlocking {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val clock = DesktopClock()
     val persist = FilePersist(File(config.dataDir, "world.json"), clock)
-    val store = Store(BlockEngine(), persist, clock, scope)
+    val telemetry = FileTelemetry(File(config.dataDir, "telemetry.log")).also { it.prune(clock.nowWallMs()) }
+    val store = Store(BlockEngine(), persist, clock, scope, telemetry)
     if (store.world.value.deviceId.isEmpty()) {
         store.edit { it.copy(deviceId = "laptop-" + UUID.randomUUID().toString().take(8)) }
     }
@@ -36,7 +37,7 @@ fun main() = runBlocking {
     val foreground = Foreground(store)
     enforcer.foreground = foreground
     store.shield = enforcer
-    val shared = SharedSyncClient(config, store, scope)
+    val shared = SharedSyncClient(config, store, telemetry, scope)
     val loop = LoopClient(config, store, scope)
 
     if (KWin.export(enforcer)) KWin.reloadScript() // our script lists the open windows again
@@ -67,6 +68,8 @@ fun main() = runBlocking {
     var lastMono = clock.nowMonotonicMs()
     var seconds = 0
     var extensionAlerted = false
+    var syncFailingSince: Long? = null
+    var syncAlerted = false
     while (true) {
         val now = clock.nowMonotonicMs()
         if (now - lastMono > 10_000) store.dispatch(BlockEvent.BootOrColdStart)
@@ -87,11 +90,28 @@ fun main() = runBlocking {
                 notifier.notify("Website blocking is off", "The xrnhabit extension isn't answering in this browser. Turn it on in the extensions page.", urgent = true)
             }
             extensionAlerted = missing
+
+            // Sync failing for an hour: the phone's unlocks and ticks stop arriving, silently.
+            val failing = listOfNotNull(shared.status.value, loop.status.value).firstOrNull { !it.ok }
+            val wall = System.currentTimeMillis()
+            syncFailingSince = if (failing == null) null else syncFailingSince ?: wall
+            val stuck = syncFailingSince?.let { wall - it >= SYNC_ALERT_MS } == true
+            if (stuck && !syncAlerted) {
+                notifier.notify(
+                    "Not syncing with your home server",
+                    "Nothing has synced for over an hour (${failing?.message}), so unlocks and ticks from the phone aren't reaching this laptop.",
+                    urgent = true,
+                )
+            }
+            syncAlerted = stuck
         }
         seconds++
         delay(1_000)
     }
 }
+
+/** How long sync may fail before the "not syncing" notification. */
+private const val SYNC_ALERT_MS = 60 * 60 * 1000L
 
 private fun needsTicking(world: World): Boolean =
     world.sessions.isNotEmpty() ||

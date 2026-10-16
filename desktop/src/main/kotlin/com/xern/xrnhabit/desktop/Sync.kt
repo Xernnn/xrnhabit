@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonArray
@@ -64,10 +65,13 @@ class Http(user: String, password: String) {
 class SharedSyncClient(
     private val config: Config,
     private val store: Store,
+    private val telemetry: FileTelemetry,
     private val scope: CoroutineScope,
 ) {
     private val http = Http(config.user, config.password)
     private val baseFile = File(config.dataDir, "shared-base.json")
+    private val eventsSentFile = File(config.dataDir, "events-sent")
+    private var telemetrySizeSent = -1L
     private val requests = Channel<Unit>(Channel.CONFLATED)
     private val _status = MutableStateFlow<SyncStatus?>(null)
     val status: StateFlow<SyncStatus?> = _status.asStateFlow()
@@ -81,6 +85,7 @@ class SharedSyncClient(
             for (r in requests) {
                 try {
                     _status.value = SyncStatus(System.currentTimeMillis(), true, round())
+                    runCatching { sendEvents() } // best effort: what doesn't go now goes next round
                 } catch (e: Exception) {
                     _status.value = SyncStatus(System.currentTimeMillis(), false, describe(e))
                     delay(5_000)
@@ -156,6 +161,21 @@ class SharedSyncClient(
         throw IOException("the server kept changing; trying again")
     }
 
+    /** The laptop's event log newer than what the server has, for the weekly review. */
+    private fun sendEvents() {
+        val size = telemetry.size()
+        if (size == telemetrySizeSent) return
+        val since = eventsSentFile.takeIf { it.isFile }?.readText()?.trim()?.toLongOrNull() ?: 0
+        val fresh = telemetry.eventsAfter(since)
+        if (fresh.isNotEmpty()) {
+            val body = JsonObject(mapOf("events" to JsonArray(fresh))).toString()
+            val r = http.send("${config.habitUrl}/events", "POST", body)
+            check(r.statusCode() == 200) { "server answered ${r.statusCode()}" }
+            eventsSentFile.writeText(fresh.maxOf { it["at"]!!.jsonPrimitive.long }.toString())
+        }
+        telemetrySizeSent = size
+    }
+
     private fun loadBase(): Base? = try {
         json.decodeFromString(Base.serializer(), baseFile.readText())
     } catch (_: Exception) {
@@ -185,6 +205,11 @@ class LoopClient(
     private val _status = MutableStateFlow<SyncStatus?>(null)
     val status: StateFlow<SyncStatus?> = _status.asStateFlow()
     private val kicks = Channel<Unit>(Channel.CONFLATED)
+
+    /** Read the habits again now: an item was just linked. */
+    fun kick() {
+        kicks.trySend(Unit)
+    }
 
     private fun anyLinked() = store.world.value.checklist.values.any { items -> items.any { it.externalHabitId != null } }
 

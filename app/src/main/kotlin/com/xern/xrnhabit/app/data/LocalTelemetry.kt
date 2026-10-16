@@ -19,8 +19,9 @@ sealed interface TelemetryEvent {
 }
 
 /**
- * Append-only local event log behind the Insights history. Local file only — no network, ever
- * (brainstorm §1). One `;`-separated line per event (the `.jsonl` name is historical).
+ * Append-only local event log behind the Insights history. One `;`-separated line per event (the
+ * `.jsonl` name is historical). It stays on the phone (brainstorm §1) unless sync with the
+ * user's own server is set up: then [SharedSync] also sends it there, for the weekly review.
  */
 class LocalTelemetry(private val file: File) : Telemetry {
 
@@ -33,6 +34,9 @@ class LocalTelemetry(private val file: File) : Telemetry {
     private fun append(line: String) {
         runCatching { file.appendText(line + "\n") }
     }
+
+    /** The log's size in bytes, a cheap "anything new?" check. */
+    fun size(): Long = file.length()
 
     /** Everything logged, oldest first. Blocking — call off the main thread. */
     @Synchronized

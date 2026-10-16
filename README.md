@@ -25,7 +25,8 @@ sync with a server of your own, which also brings the same blocks to a Linux lap
 - **On the laptop too** (optional). With a small sync server of your own (`server/`), a
   laptop daemon (`desktop/`, KDE Plasma 6) enforces the same blocks on websites (a browser
   extension) and desktop apps. An unlock earned or redeemed on either device opens the block
-  on both; the daily unlock limit, the break and lockdowns are shared. See
+  on both; the daily unlock limit, the break and lockdowns are shared. Blocks can be made and
+  edited on the laptop too, and the habits web page has a weekly review of both devices. See
   [desktop/README.md](desktop/README.md).
 - **Insights.** Per-app screen time, habits done, times blocked and your streak, and in the
   sideload build per-site time.

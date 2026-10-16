@@ -35,10 +35,15 @@ interface ForegroundAppDetector {
  * The cursor and `current` live on the detector, not in one collection of the flow: the service
  * stops collecting while the screen is off (polling then is pure battery drain) and the next
  * collection carries on from where the last one stopped, catching up on everything in between.
+ *
+ * It polls every [fastPollMs] while [fast] says a block could need covering at once, and only
+ * every [slowPollMs] otherwise (no block yet: the site-time log is all that listens).
  */
 class UsageStatsDetector(
     context: Context,
-    private val pollIntervalMs: Long = 300L,
+    private val fastPollMs: Long = 300L,
+    private val slowPollMs: Long = 2_000L,
+    private val fast: () -> Boolean = { true },
 ) : ForegroundAppDetector {
 
     private val usm = context.getSystemService(UsageStatsManager::class.java)
@@ -50,7 +55,7 @@ class UsageStatsDetector(
     override val foregroundPackage: Flow<String?> = flow {
         while (true) {
             emit(poll())
-            delay(pollIntervalMs)
+            delay(if (fast()) fastPollMs else slowPollMs)
         }
     }.distinctUntilChanged().flowOn(Dispatchers.Default)
 

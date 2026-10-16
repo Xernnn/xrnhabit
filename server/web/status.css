@@ -73,6 +73,12 @@ a:hover { text-decoration: underline; }
 .summary span { font-size: 12.5px; color: var(--muted); }
 @media (max-width: 560px) { .summary { grid-template-columns: 1fr 1fr; } }
 
+.devices { display: flex; flex-wrap: wrap; gap: 8px 28px; padding: 12px 18px; }
+.device { display: flex; gap: 8px; align-items: baseline; font-size: 14px; }
+.device::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--open); align-self: center; }
+.device span { color: var(--muted); font-size: 13px; }
+.device.stale::before { background: var(--earned); }
+
 .meter { height: 6px; border-radius: 3px; background: var(--surface-2); margin-top: 6px; overflow: hidden; }
 .meter i { display: block; height: 100%; background: var(--accent); }
 

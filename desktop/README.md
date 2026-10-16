@@ -55,11 +55,13 @@ the phone.
 
 ## Using it
 
-- **Blocks are made on the phone.** The local page shows them all. **Laptop apps & sites**
-  sets which desktop apps and websites each one covers on the laptop. Sites are shared with
-  the phone; apps only matter here. Adding is instant. Taking something away waits 60 seconds
-  with the page open, like any loosening on the phone. A hardcore block can only be loosened
-  on the phone.
+- **Blocks** can be made on either device. On the local page, **+ New block** makes one with
+  the phone's choices (a habit with tasks, a timer or both, a daily limit, a schedule or a
+  lockdown), covering laptop apps and websites; add phone apps to it on the phone. **Edit**
+  changes a block's name, laptop apps, sites, minutes and tasks, links a task to a habit, or
+  deletes it. Sites are shared with the phone; laptop apps only matter here. Tightening is
+  instant. Anything that loosens a block waits 60 seconds with the page open, like on the
+  phone, and a hardcore block can only be loosened on the phone.
 - **Opening a blocked app** closes it at once (a tray app like Steam is also stopped). A
   notification appears, and the block page opens in the browser.
 - **Opening a blocked site** turns the tab into the block page. Once the site is open again,
@@ -71,6 +73,9 @@ the phone.
   block page within a few seconds.
 - A locked screen or a sleeping laptop counts as "nothing in use", so daily allowances don't
   drain overnight.
+- **History.** Blocked app opens, habits done and unlock time go to the sync server, which
+  keeps 120 days of them from both devices for the **Review** page of the habits web app.
+- If sync has been failing for an hour, a notification says so.
 
 ## Limits
 

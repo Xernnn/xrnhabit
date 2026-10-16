@@ -6,6 +6,8 @@ import com.xern.xrnhabit.domain.PersistPort
 import com.xern.xrnhabit.domain.World
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -110,5 +112,19 @@ class DesktopTest {
         assertEquals("org.kde.kcalc", DesktopApps.resolve("org.kde.kcalc.desktop", "kcalc"))
         assertEquals(null, DesktopApps.resolve("", ""))
         assertTrue(DesktopApps.resolve("", "SomeGame")!!.isNotEmpty())
+    }
+
+    @Test
+    fun telemetryHandsOutOnlyNewerEventsAndForgetsOldOnes() {
+        val log = FileTelemetry(File(Files.createTempDirectory("xrnhabit").toFile(), "telemetry.log"))
+        val day = 86_400_000L
+        log.onBlockedImpression("org.kde.kcalc", 1_000)
+        log.onHabitCompleted("b1", 200 * day)
+        log.onUnlockConsumed("b1", 300_000, 200 * day + 1)
+        val after = log.eventsAfter(1_000)
+        assertEquals(listOf("habit", "unlock"), after.map { it["t"]!!.jsonPrimitive.content })
+        assertEquals(300_000L, after[1]["ms"]!!.jsonPrimitive.long)
+        log.prune(nowWallMs = 200 * day, keepDays = 120)
+        assertEquals(2, log.eventsAfter(0).size) // the blocked event at 1 s was 200 days old
     }
 }

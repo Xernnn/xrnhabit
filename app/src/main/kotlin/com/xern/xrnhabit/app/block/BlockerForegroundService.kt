@@ -30,8 +30,10 @@ import com.xern.xrnhabit.domain.World
 import com.xern.xrnhabit.domain.epochDay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
@@ -121,7 +123,9 @@ class BlockerForegroundService : LifecycleService() {
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
 
-        val detector: ForegroundAppDetector = UsageStatsDetector(this)
+        val detector: ForegroundAppDetector = UsageStatsDetector(this) {
+            container.store.world.value.blocks.any { it.enabled }
+        }
 
         // 1. foreground app (+ browser site) -> engine and the site-time log. The detector only
         //    polls while the screen is on and unlocked.
@@ -194,6 +198,22 @@ class BlockerForegroundService : LifecycleService() {
         lifecycleScope.launch {
             container.store.effects.collect { effect -> onEffect(effect, container.store.world.value) }
         }
+
+        // 6. while a block screen is up, hear about the laptop and the web app within seconds:
+        //    a long-poll on the shared state, and a fresh read of xrnloops for linked items
+        lifecycleScope.launch {
+            overlay.visible.collectLatest { up ->
+                if (!up) return@collectLatest
+                // Scoped to this showing: both stop when the shield goes (collectLatest cancels).
+                coroutineScope {
+                    launch { container.shared.watch() }
+                    while (true) {
+                        delay(SHIELD_LOOP_SYNC_MS)
+                        if (overlay.showsLinkedItem) container.loop.sync()
+                    }
+                }
+            }
+        }
     }
 
     private fun onEffect(effect: Effect, world: World) {
@@ -232,9 +252,27 @@ class BlockerForegroundService : LifecycleService() {
         val sitesOff = container.websites.isSupported() &&
             world.blocks.any { it.targetSites.isNotEmpty() } &&
             container.websites.tracking(this) != WebsiteTracking.ON
-        val health = "${missing.joinToString()}|$sitesOff"
+        // Sync failing for an hour: unlocks and ticks from the laptop stop arriving, silently.
+        val now = System.currentTimeMillis()
+        val blocksStuck = container.shared.failingSince.value?.let { now - it >= SYNC_ALERT_MS } == true
+        val habitsStuck = container.loop.serverFailingSince.value?.let { now - it >= SYNC_ALERT_MS } == true
+        val health = "${missing.joinToString()}|$sitesOff|$blocksStuck|$habitsStuck"
         if (health == lastHealth) return
         lastHealth = health
+
+        if (blocksStuck || habitsStuck) {
+            val what = buildList {
+                if (blocksStuck) add("Blocks and unlocks (${container.shared.status.value?.message ?: "failing"}): xrnhabit → Settings → Sync with laptop.")
+                if (habitsStuck) add("Habits: xrnloops → Settings → Sync with home server.")
+            }
+            notifications.alert(
+                Notifications.ALERT_SYNC_OFF,
+                "Not syncing with your home server",
+                "Nothing has synced for over an hour, so the laptop and this phone have drifted apart. " + what.joinToString(" "),
+            )
+        } else {
+            notifications.cancel(Notifications.ALERT_SYNC_OFF)
+        }
 
         if (missing.isEmpty()) {
             notifications.cancel(Notifications.ALERT_BLOCKING_OFF)
@@ -306,6 +344,12 @@ class BlockerForegroundService : LifecycleService() {
     }
 
     companion object {
+        /** How long sync may fail before the "not syncing" alert. */
+        private const val SYNC_ALERT_MS = 60 * 60 * 1000L
+
+        /** How often a block screen showing an xrnloops item re-reads it (and xrnloops its server). */
+        private const val SHIELD_LOOP_SYNC_MS = 15_000L
+
         /**
          * Android 12+ refuses foreground-service starts from a process that came up in the
          * background (a watchdog job, the system binding the website reader) by throwing

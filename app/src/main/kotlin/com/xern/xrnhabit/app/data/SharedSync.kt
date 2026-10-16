@@ -7,22 +7,29 @@ import androidx.core.content.edit
 import androidx.core.util.AtomicFile
 import com.xern.xrnhabit.domain.BlockEvent
 import com.xern.xrnhabit.domain.SharedState
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
@@ -38,6 +45,11 @@ class SyncSettings(context: Context) {
     val password: String get() = prefs.getString(KEY_PASSWORD, "").orEmpty()
     val isConfigured: Boolean get() = url.startsWith("http") && user.isNotEmpty() && password.isNotEmpty()
 
+    /** The newest event already sent to the server (wall ms); later ones go with the next round. */
+    var eventsSentUntil: Long
+        get() = prefs.getLong(KEY_EVENTS_SENT, 0)
+        set(value) = prefs.edit { putLong(KEY_EVENTS_SENT, value) }
+
     fun save(url: String, user: String, password: String) = prefs.edit {
         putString(KEY_URL, url.trim())
         putString(KEY_USER, user.trim())
@@ -48,6 +60,7 @@ class SyncSettings(context: Context) {
         const val KEY_URL = "url"
         const val KEY_USER = "user"
         const val KEY_PASSWORD = "password"
+        const val KEY_EVENTS_SENT = "events_sent_until"
     }
 }
 
@@ -73,6 +86,7 @@ data class SharedSyncStatus(val atWallMs: Long, val ok: Boolean, val message: St
 class SharedSync(
     private val context: Context,
     private val store: WorldStore,
+    private val telemetry: LocalTelemetry,
     private val scope: CoroutineScope,
 ) {
     val settings = SyncSettings(context)
@@ -84,9 +98,14 @@ class SharedSync(
     }
     private val mutex = Mutex()
     private var pending: Job? = null
+    private var telemetrySizeSent = -1L
 
     private val _status = MutableStateFlow<SharedSyncStatus?>(null)
     val status: StateFlow<SharedSyncStatus?> = _status.asStateFlow()
+
+    /** When rounds started failing, for the "not syncing" alert; null while they work. */
+    private val _failingSince = MutableStateFlow<Long?>(null)
+    val failingSince: StateFlow<Long?> = _failingSince.asStateFlow()
 
     @Serializable
     private data class Base(val etag: String, val state: SharedState)
@@ -115,13 +134,13 @@ class SharedSync(
      * would take the other device's deletions for changes of ours and undo them.
      */
     @Synchronized
-    fun request(delayMs: Long = 0) {
-        if (!settings.isConfigured) return
+    fun request(delayMs: Long = 0): Job? {
+        if (!settings.isConfigured) return null
         pending?.cancel()
-        pending = scope.launch {
+        return scope.launch {
             delay(delayMs)
             withContext(NonCancellable) { syncNow() }
-        }
+        }.also { pending = it }
     }
 
     /** Runs a round now; true if it worked. */
@@ -129,14 +148,50 @@ class SharedSync(
         if (!settings.isConfigured) return false
         return mutex.withLock {
             withContext(Dispatchers.IO) {
+                val now = System.currentTimeMillis()
                 try {
                     val message = round()
-                    _status.value = SharedSyncStatus(System.currentTimeMillis(), true, message)
+                    _status.value = SharedSyncStatus(now, true, message)
+                    _failingSince.value = null
+                    runCatching { sendEvents() } // best effort: what doesn't go now goes next round
                     true
                 } catch (e: Exception) {
-                    _status.value = SharedSyncStatus(System.currentTimeMillis(), false, describe(e))
+                    _status.value = SharedSyncStatus(now, false, describe(e))
+                    if (_failingSince.value == null) _failingSince.value = now
                     false
                 }
+            }
+        }
+    }
+
+    /**
+     * While a block screen is up: a long-poll that answers as soon as another device writes, so
+     * an unlock redeemed on the laptop lifts the shield within a second or two instead of at the
+     * next minute check. Runs until cancelled; the request in flight then finishes on its own
+     * (within [WATCH_WAIT_S]).
+     */
+    suspend fun watch() {
+        while (currentCoroutineContext().isActive) {
+            val etag = loadBase()?.etag
+            if (!settings.isConfigured || etag == null) {
+                delay(WATCH_RETRY_MS)
+                continue
+            }
+            val changed = try {
+                withContext(Dispatchers.IO) {
+                    Api(settings.url, settings.user, settings.password).get(etag, waitS = WATCH_WAIT_S) != null
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                delay(WATCH_RETRY_MS) // the next round reports what's wrong
+                false
+            }
+            // Through request(): a round must not be cut short (see there). Waiting for it
+            // also moves the base on, so the next long-poll doesn't answer at once.
+            if (changed) {
+                request(0)?.join()
+                if (_status.value?.ok == false) delay(WATCH_RETRY_MS)
             }
         }
     }
@@ -158,6 +213,47 @@ class SharedSync(
             return "Sent"
         }
         throw IOException("the server kept changing; will try again")
+    }
+
+    /**
+     * This phone's event log newer than what the server has (blocked, habit done, unlock used),
+     * for the weekly review in the habits web app. Apps go with their names, which the server
+     * can't look up.
+     */
+    private fun sendEvents() {
+        val size = telemetry.size()
+        if (size == telemetrySizeSent) return
+        val since = settings.eventsSentUntil
+        val fresh = telemetry.events().filter { it.atWallMs > since }
+        if (fresh.isNotEmpty()) {
+            val names = HashMap<String, String>() // the first upload carries the whole log
+            val events = JsonArray(
+                fresh.map { e ->
+                    buildJsonObject {
+                        put("at", e.atWallMs)
+                        when (e) {
+                            is TelemetryEvent.Blocked -> {
+                                put("t", "blocked")
+                                put("target", e.pkg)
+                                put("name", names.getOrPut(e.pkg) { InstalledApps.labelFor(context, e.pkg) })
+                            }
+                            is TelemetryEvent.HabitDone -> {
+                                put("t", "habit")
+                                put("block", e.blockId)
+                            }
+                            is TelemetryEvent.UnlockUsed -> {
+                                put("t", "unlock")
+                                put("block", e.blockId)
+                                put("ms", e.ms)
+                            }
+                        }
+                    }
+                },
+            )
+            Api(settings.url, settings.user, settings.password).postEvents(JsonObject(mapOf("events" to events)).toString())
+            settings.eventsSentUntil = fresh.maxOf { it.atWallMs }
+        }
+        telemetrySizeSent = size
     }
 
     private fun loadBase(): Base? = try {
@@ -193,9 +289,13 @@ class SharedSync(
     private inner class Api(private val baseUrl: String, user: String, password: String) {
         private val auth = "Basic " + Base64.encodeToString("$user:$password".toByteArray(), Base64.NO_WRAP)
 
-        /** The server's copy, or null when it still is [ifNoneMatch]. */
-        fun get(ifNoneMatch: String?): Remote? {
-            val conn = open("GET")
+        /**
+         * The server's copy, or null when it still is [ifNoneMatch]. With [waitS], the server
+         * holds a 304 back for up to that long, answering as soon as the copy changes.
+         */
+        fun get(ifNoneMatch: String?, waitS: Int = 0): Remote? {
+            val conn = open("GET", if (waitS > 0) "?wait=$waitS" else "")
+            if (waitS > 0) conn.readTimeout = (waitS + 15) * 1000
             try {
                 ifNoneMatch?.let { conn.setRequestProperty("If-None-Match", it) }
                 val code = conn.responseCode
@@ -225,8 +325,21 @@ class SharedSync(
             }
         }
 
-        private fun open(method: String): HttpURLConnection =
-            (URL("$baseUrl/state").openConnection() as HttpURLConnection).apply {
+        /** POST /events: our part of the review log. */
+        fun postEvents(body: String) {
+            val conn = open("POST", path = "/events")
+            try {
+                conn.doOutput = true
+                conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                conn.outputStream.use { it.write(body.encodeToByteArray()) }
+                check(conn, conn.responseCode)
+            } finally {
+                conn.disconnect()
+            }
+        }
+
+        private fun open(method: String, query: String = "", path: String = "/state"): HttpURLConnection =
+            (URL("$baseUrl$path$query").openConnection() as HttpURLConnection).apply {
                 requestMethod = method
                 connectTimeout = TIMEOUT_MS
                 readTimeout = TIMEOUT_MS
@@ -248,5 +361,7 @@ class SharedSync(
         const val PERIOD_MS = 60_000L
         const val MAX_TRIES = 4
         const val TIMEOUT_MS = 15_000
+        const val WATCH_WAIT_S = 25
+        const val WATCH_RETRY_MS = 5_000L
     }
 }

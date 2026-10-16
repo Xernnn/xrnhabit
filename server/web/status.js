@@ -10,6 +10,7 @@ let doc = null;
 let etag = "";
 let online = true;
 let updated = { at: "", by: "" };
+let devices = {}; // device -> epoch ms of its last check-in
 
 function load() {
   try {
@@ -43,17 +44,36 @@ function h(tag, attrs = {}, ...children) {
 
 class AuthError extends Error {}
 
+/** The server's answer to too many wrong passwords from this address. */
+const LOCKED_OUT = "Too many wrong passwords from here. Wait 15 minutes, then try again.";
+
+function check(res) {
+  if (res.status === 401) throw new AuthError();
+  if (res.status === 429) throw new Error(LOCKED_OUT);
+}
+
 async function fetchState(wait) {
   const headers = { Authorization: auth, "X-Xrn-Client": "web" };
   if (wait && etag) headers["If-None-Match"] = etag;
   const res = await fetch(new URL(wait ? `state?wait=${wait}` : "state", location.href), { headers, cache: "no-store" });
-  if (res.status === 401) throw new AuthError();
+  check(res);
   if (res.status === 304) return false;
   if (!res.ok) throw new Error(`${res.status}`);
   doc = await res.json();
   etag = res.headers.get("ETag") ?? "";
   updated = { at: res.headers.get("X-Updated") ?? "", by: res.headers.get("X-Updated-By") ?? "" };
   return true;
+}
+
+/** When the phone and the laptop last checked in; refreshed with each redraw. */
+async function fetchDevices() {
+  try {
+    const res = await fetch(new URL("devices", location.href), { headers: { Authorization: auth, "X-Xrn-Client": "web" }, cache: "no-store" });
+    check(res);
+    if (res.ok) devices = await res.json();
+  } catch {
+    /* the state still shows; the next redraw tries again */
+  }
 }
 
 async function live(gen) {
@@ -80,6 +100,7 @@ function setOnline(value) {
 async function start() {
   const gen = ++generation;
   await fetchState(0);
+  await fetchDevices();
   render();
   live(gen);
 }
@@ -104,7 +125,7 @@ function loginView(message = "") {
         save(auth);
       } catch (err) {
         auth = null;
-        error.textContent = err instanceof AuthError ? "Wrong user name or password." : `Can't reach the server (${err.message}).`;
+        error.textContent = err instanceof AuthError ? "Wrong user name or password." : err.message === LOCKED_OUT ? LOCKED_OUT : `Can't reach the server (${err.message}).`;
       }
     },
   }, h("label", {}, "User", user), h("label", {}, "Password", password), error, h("button", { class: "btn", type: "submit" }, "Sign in"));
@@ -129,6 +150,26 @@ function epochDay(now = new Date()) {
 }
 
 const minutes = (ms) => Math.round(ms / 60000);
+
+function ago(ms) {
+  const m = Math.floor(ms / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m} min ago`;
+  if (m < 48 * 60) return `${Math.floor(m / 60)} h ago`;
+  return `${Math.floor(m / 1440)} days ago`;
+}
+
+/** Each device's last check-in. The phone checks in while its screen is on, the laptop while it's awake. */
+function devicesCard(now) {
+  const names = { phone: "Phone", laptop: "Laptop" };
+  const known = Object.entries(devices).sort(([a], [b]) => a.localeCompare(b));
+  if (!known.length) return null;
+  return h("section", { class: "card devices" }, known.map(([device, at]) => {
+    const stale = now.getTime() - at > 60 * 60000;
+    return h("div", { class: "device" + (stale ? " stale" : ""), title: stale ? "Not heard from in over an hour" : "" },
+      h("b", {}, names[device] ?? device), h("span", {}, `synced ${ago(now.getTime() - at)}`));
+  }));
+}
 
 /** BlockEngine.scheduleActive (I20): a window past midnight belongs to the day it starts on. */
 function scheduleActive(schedule, now = new Date()) {
@@ -254,6 +295,7 @@ function render() {
           h("div", { class: "meter" }, h("i", { style: `width:${Math.min(100, (usedMs / cap) * 100)}%` }))),
         h("div", {}, h("b", {}, breakText), h("span", {}, "15-minute break")),
         h("div", {}, h("b", {}, blocks.length), h("span", {}, blocks.length === 1 ? "Block" : "Blocks"))),
+      devicesCard(now),
       blocks.length ? cards : h("div", { class: "card empty" }, "No blocks yet. Set them up in xrnhabit on the phone; they show up here after its next sync."),
       h("div", { class: "foot" },
         h("span", {}, updatedText),
@@ -261,10 +303,13 @@ function render() {
 }
 
 // Statuses change with the clock alone (sessions end, schedules start): redraw each half minute.
-setInterval(render, 30000);
+setInterval(async () => {
+  if (auth) await fetchDevices();
+  render();
+}, 30000);
 
 if (auth) {
-  start().catch((e) => (e instanceof AuthError ? signOut("Your password was refused. Sign in again.") : loginView(`Can't reach the server (${e.message}).`)));
+  start().catch((e) => (e instanceof AuthError ? signOut("Your password was refused. Sign in again.") : loginView(e.message === LOCKED_OUT ? LOCKED_OUT : `Can't reach the server (${e.message}).`)));
 } else {
   loginView();
 }

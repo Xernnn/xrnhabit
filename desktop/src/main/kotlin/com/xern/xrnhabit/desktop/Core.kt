@@ -21,6 +21,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
+import kotlinx.serialization.json.put
 import java.io.File
 import java.io.IOException
 import java.nio.channels.FileChannel
@@ -181,6 +186,80 @@ object NoTelemetry : Telemetry {
 }
 
 /**
+ * The laptop's event log, in the phone's format (`LocalTelemetry`): a blocked app opened, a
+ * habit done, an unlock used, one `;`-separated line each. [SharedSyncClient] sends new lines
+ * to the server for the weekly review in the habits web app.
+ */
+class FileTelemetry(private val file: File) : Telemetry {
+    override fun onBlockedImpression(pkg: String, atWallMs: Long) = append("blocked;$pkg;$atWallMs")
+    override fun onHabitCompleted(blockId: String, atWallMs: Long) = append("habit;$blockId;$atWallMs")
+    override fun onUnlockConsumed(blockId: String, ms: Long, atWallMs: Long) = append("unlock;$blockId;$ms;$atWallMs")
+
+    @Synchronized
+    private fun append(line: String) {
+        runCatching {
+            file.parentFile.mkdirs()
+            file.appendText(line + "\n")
+        }
+    }
+
+    /** The log's size in bytes, a cheap "anything new?" check. */
+    fun size(): Long = file.length()
+
+    /** Events after [sinceMs] as the server takes them (`POST /events`), oldest first. */
+    @Synchronized
+    fun eventsAfter(sinceMs: Long): List<JsonObject> = lines().mapNotNull { line ->
+        val f = line.split(';')
+        when (f.firstOrNull()) {
+            "blocked" -> f.getOrNull(2)?.toLongOrNull()?.let { at ->
+                buildJsonObject {
+                    put("t", "blocked")
+                    put("at", at)
+                    put("target", f[1])
+                    put("name", DesktopApps.name(f[1]))
+                }
+            }
+            "habit" -> f.getOrNull(2)?.toLongOrNull()?.let { at ->
+                buildJsonObject {
+                    put("t", "habit")
+                    put("at", at)
+                    put("block", f[1])
+                }
+            }
+            "unlock" -> {
+                val ms = f.getOrNull(2)?.toLongOrNull()
+                val at = f.getOrNull(3)?.toLongOrNull()
+                if (ms == null || at == null) {
+                    null
+                } else {
+                    buildJsonObject {
+                        put("t", "unlock")
+                        put("at", at)
+                        put("block", f[1])
+                        put("ms", ms)
+                    }
+                }
+            }
+            else -> null
+        }
+    }.filter { it["at"]!!.jsonPrimitive.long > sinceMs }
+
+    /** Drops lines older than [keepDays] (the server keeps the same 120). */
+    @Synchronized
+    fun prune(nowWallMs: Long, keepDays: Int = 120) {
+        val cutoff = nowWallMs - keepDays * 86_400_000L
+        val lines = lines()
+        val kept = lines.filter { line -> line.split(';').last().toLongOrNull()?.let { it >= cutoff } != false }
+        if (kept.size == lines.size) return
+        val tmp = File(file.path + ".tmp")
+        tmp.writeText(kept.joinToString("") { it + "\n" })
+        tmp.renameTo(file)
+    }
+
+    private fun lines(): List<String> = runCatching { file.readLines() }.getOrDefault(emptyList())
+}
+
+/**
  * Serializes every change to the [World] through one mutex, as the phone's `WorldStore` does,
  * so persist-before-shield (I7) holds whoever calls: the tick, D-Bus, the local page, sync.
  */
@@ -189,6 +268,7 @@ class Store(
     private val persist: PersistPort,
     val clock: Clock,
     private val scope: CoroutineScope,
+    private val telemetry: Telemetry = NoTelemetry,
 ) {
     @Volatile
     var shield: ShieldPort = object : ShieldPort {
@@ -207,7 +287,7 @@ class Store(
 
     suspend fun dispatchAndGet(event: BlockEvent): World = mutex.withLock {
         val outcome = engine.reduce(_world.value, event, clock)
-        applyOutcome(outcome, persist, shield, NoTelemetry, clock.nowWallMs())
+        applyOutcome(outcome, persist, shield, telemetry, clock.nowWallMs())
         _world.value = outcome.world
         outcome.effects.forEach { _effects.tryEmit(it) }
         outcome.world

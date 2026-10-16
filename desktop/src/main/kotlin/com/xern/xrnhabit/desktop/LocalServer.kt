@@ -15,7 +15,10 @@ import com.xern.xrnhabit.domain.World
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.serializer
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
@@ -75,6 +78,10 @@ class LocalServer(
         if (ex.requestMethod == "POST" && ex.requestHeaders.getFirst("X-Xrnhabit") == null) return send(ex, 403, "missing X-Xrnhabit")
         when {
             ex.requestMethod == "GET" && path == "/api/state" -> send(ex, 200, json.encodeToString(UiState.serializer(), view()))
+            ex.requestMethod == "GET" && path == "/api/habits" -> send(ex, 200, habits())
+            ex.requestMethod == "POST" && path == "/api/block" -> send(ex, 200, saveBlock(body(ex)))
+            ex.requestMethod == "POST" && path == "/api/block/delete" -> send(ex, 200, deleteBlock(json.parseToJsonElement(body(ex)).jsonObject))
+            ex.requestMethod == "POST" && path == "/api/item" -> send(ex, 200, item(json.parseToJsonElement(body(ex)).jsonObject))
             ex.requestMethod == "GET" && path == "/api/apps" -> send(ex, 200, json.encodeToString(kotlinx.serialization.builtins.ListSerializer(DesktopApps.App.serializer()), DesktopApps.all()))
             ex.requestMethod == "GET" && path == "/ext/check" -> {
                 val host = query["host"].orEmpty()
@@ -134,16 +141,90 @@ class LocalServer(
         val id = body["blockId"]!!.jsonPrimitive.content
         val apps = body["desktopApps"]!!.jsonArray.map { it.jsonPrimitive.content }.filter { it.isNotBlank() }.toSet()
         val sites = body["sites"]!!.jsonArray.mapNotNull { Sites.normalize(it.jsonPrimitive.content) }.toSet()
-        val world = store.world.value
-        val old = world.block(id) ?: return """{"error":"no such block"}"""
+        val old = store.world.value.block(id) ?: return error("That block is gone.")
         val new = old.copy(targetDesktopApps = apps, targetSites = sites)
-        val apply: suspend () -> Unit = { store.edit { w -> w.copy(blocks = w.blocks.map { b -> if (b.id == id) b.copy(targetDesktopApps = apps, targetSites = sites) else b }) } }
-        if (!BlockEdits.loosens(old, new) || !BlockEdits.guardNeeded(store.engine, world, old, store.clock)) {
+        return loosening(old, new) { store.edit { w -> w.copy(blocks = w.blocks.map { b -> if (b.id == id) b.copy(targetDesktopApps = apps, targetSites = sites) else b }) } }
+    }
+
+    /**
+     * Applies a change to [old] at once, unless it loosens the block ([new] null: always): then it
+     * waits out the guard (contract §2.3), and a hardcore block only loosens on the phone.
+     */
+    private fun loosening(old: Block, new: Block?, apply: suspend () -> Unit): String {
+        val loosens = new == null || BlockEdits.loosens(old, new)
+        if (!loosens || !BlockEdits.guardNeeded(store.engine, store.world.value, old, store.clock)) {
             runBlocking { apply() }
             return "{}"
         }
-        if (old.enforcementTier == EnforcementTier.HARDCORE) return """{"error":"This is a hardcore block: loosen it on the phone, with its password."}"""
+        if (old.enforcementTier == EnforcementTier.HARDCORE) return error("This is a hardcore block: loosen it on the phone, with its password.")
         return guarded(apply)
+    }
+
+    private fun error(text: String) = """{"error":${json.encodeToString(String.serializer(), text)}}"""
+
+    /** The habits a checklist item can be linked to, from xrnloops-sync. */
+    private fun habits(): String = try {
+        val list = loop.habits().filter { it["archived"]?.jsonPrimitive?.booleanOrNull != true }
+            .map { buildJsonObject { put("uuid", it["uuid"]!!.jsonPrimitive.content); put("name", it["name"]!!.jsonPrimitive.content) } }
+        JsonArray(list).toString()
+    } catch (e: Exception) {
+        error("Can't read your habits: ${describe(e)}")
+    }
+
+    /** Creates a block, or edits one ([BlockForms]); an edit that loosens it waits. */
+    private fun saveBlock(raw: String): String {
+        val form = try {
+            json.decodeFromString(BlockForms.Form.serializer(), raw)
+        } catch (_: Exception) {
+            return error("That form didn't make sense.")
+        }
+        val world = store.world.value
+        if (form.id == null) {
+            (BlockForms.create(world, form, store.clock) as? BlockForms.Result.Invalid)?.let { return error(it.reason) }
+            // Built again inside the edit, against the world as it is by then.
+            runBlocking { store.edit { w -> (BlockForms.create(w, form, store.clock) as? BlockForms.Result.Ok)?.world ?: w } }
+            if (form.linked.isNotEmpty()) loop.kick()
+            return "{}"
+        }
+        val old = world.block(form.id) ?: return error("That block is gone.")
+        val new = when (val r = BlockForms.edit(world, form)) {
+            is BlockForms.Result.Invalid -> return error(r.reason)
+            is BlockForms.Result.Ok -> r.block
+        }
+        return loosening(old, new) { store.edit { w -> (BlockForms.edit(w, form) as? BlockForms.Result.Ok)?.world ?: w } }
+    }
+
+    /** Deleting a block always loosens it. */
+    private fun deleteBlock(body: JsonObject): String {
+        val id = body["blockId"]!!.jsonPrimitive.content
+        val old = store.world.value.block(id) ?: return "{}"
+        return loosening(old, null) { store.edit { w -> BlockForms.delete(w, id) } }
+    }
+
+    /** A checklist item added, linked to a habit (both at once), or removed (that waits). */
+    private fun item(body: JsonObject): String {
+        val blockId = body["blockId"]!!.jsonPrimitive.content
+        val old = store.world.value.block(blockId) ?: return error("That block is gone.")
+        if (old.mode != BlockMode.HABIT || old.trigger.type == TriggerType.TIMER) return error("This block doesn't unlock with tasks.")
+        return when (body["op"]?.jsonPrimitive?.contentOrNull) {
+            "add" -> {
+                val text = body["text"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                if (text.isEmpty()) return error("Write the task first.")
+                runBlocking { store.edit { w -> BlockForms.addItem(w, blockId, text) } }
+                "{}"
+            }
+            "link" -> {
+                val habit = json.decodeFromJsonElement(BlockForms.LinkedHabit.serializer(), body["habit"]!!)
+                runBlocking { store.edit { w -> BlockForms.linkHabit(w, blockId, habit) } }
+                loop.kick()
+                "{}"
+            }
+            "remove" -> {
+                val itemId = body["itemId"]!!.jsonPrimitive.content
+                loosening(old, null) { store.edit { w -> BlockForms.removeItem(w, itemId) } }
+            }
+            else -> error("unknown change")
+        }
     }
 
     private fun guarded(apply: suspend () -> Unit): String {
@@ -200,6 +281,9 @@ class LocalServer(
         val items: List<UiItem>,
         val redeemRejection: String?,
         val scheduleText: String?,
+        val scheduleDays: List<Int>,
+        val scheduleStart: Int?,
+        val scheduleEnd: Int?,
     )
 
     @Serializable
@@ -289,6 +373,9 @@ class LocalServer(
             items = world.items(b.id).map { UiItem(it.id, it.text, it.done, it.externalHabitId != null, it.linkedDay.name == "YESTERDAY") },
             redeemRejection = if (b.state == BlockState.EARNED) engine.redeemRejection(world, b.id, clock)?.name else null,
             scheduleText = scheduleText,
+            scheduleDays = days.sorted(),
+            scheduleStart = w?.startMinuteOfDay,
+            scheduleEnd = w?.endMinuteOfDay,
         )
     }
 
