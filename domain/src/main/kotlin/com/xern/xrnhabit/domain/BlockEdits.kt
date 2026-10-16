@@ -12,6 +12,7 @@ object BlockEdits {
         val oldTimer = old.trigger.type == TriggerType.TIMER || old.trigger.type == TriggerType.COMBINED
         return !new.targetPackages.containsAll(old.targetPackages) ||
             !new.targetSites.containsAll(old.targetSites) ||
+            !new.targetDesktopApps.containsAll(old.targetDesktopApps) ||
             (old.enabled && !new.enabled) ||
             (old.enforcementTier == EnforcementTier.HARDCORE && new.enforcementTier == EnforcementTier.SOFT) ||
             new.mode != old.mode ||

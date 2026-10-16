@@ -95,6 +95,11 @@ data class Block(
     val targetCategories: Set<String> = emptySet(),
     /** Normalized domains (see [Sites.normalize]); each also covers its subdomains (I18). */
     val targetSites: Set<String> = emptySet(),
+    /**
+     * Laptop apps, by the `.desktop` id KWin reports (e.g. `steam`). Targets like
+     * [targetPackages] (I29); the phone never sees them in the foreground.
+     */
+    val targetDesktopApps: Set<String> = emptySet(),
     val trigger: Trigger,
     val reward: Reward = Reward(),
     val schedule: Schedule = Schedule.ALWAYS,
@@ -105,7 +110,12 @@ data class Block(
     val dailyAllowanceMs: Long = 0,
     /** [BlockMode.LOCKDOWN]: length of one lockdown, reused when it is started again (I21). */
     val lockdownMs: Long = 0,
-)
+    /** Wall-clock ms of the last edit; the later edit wins when two devices change a block at once (§2.4). */
+    val editedAtWall: Long = 0,
+) {
+    /** Everything this block blocks that can be "the foreground app": phone packages and laptop apps. */
+    val targetApps: Set<String> get() = targetPackages + targetDesktopApps
+}
 
 /**
  * A short break from every SOFT block that isn't a lockdown (I25). Counted down on the monotonic
@@ -182,7 +192,14 @@ data class UnlockSession(
     val startedAtMonotonic: Long,
     val startedAtWall: Long,
     val durationMs: Long,
-)
+) {
+    /** Names this session on every device, for the [World.unlockLog] (I28). */
+    val key: String get() = "$blockId@$startedAtWall"
+}
+
+/** One device's ALLOWANCE use of a block on the local day starting at [dayStartWall] (I19, §2.4). */
+@Serializable
+data class AllowanceUse(val dayStartWall: Long, val ms: Long)
 
 @Serializable
 data class Settings(
@@ -202,9 +219,12 @@ data class World(
     val credits: Map<String, EarnedCredit> = emptyMap(),
     val sessions: Map<String, UnlockSession> = emptyMap(),
     val checklist: Map<String, List<ChecklistItem>> = emptyMap(),
+    /** Unlock time used today before [unlockLog] existed; only old data has it (I9, I28). */
     val dailyUnlockUsedMs: Long = 0,
-    /** Epoch-day number the [dailyUnlockUsedMs] counter applies to. */
+    /** Epoch-day number [dailyUnlockUsedMs] and [unlockLog] apply to. */
     val dailyUsageEpochDay: Long = 0,
+    /** Consumed unlock time per ended session today, keyed by [UnlockSession.key] (I28). */
+    val unlockLog: Map<String, Long> = emptyMap(),
     val foregroundPkg: String? = null,
     /** Host shown in [foregroundPkg] when that is a browser and its address bar could be read (I18). */
     val foregroundSite: String? = null,
@@ -214,6 +234,10 @@ data class World(
     /** Local epoch day the last break was taken; one a day (I25). */
     val lastPauseEpochDay: Long? = null,
     val settings: Settings = Settings(),
+    /** This install's id in the shared state (§2.4); empty until the app assigns one. */
+    val deviceId: String = "",
+    /** Other devices' ALLOWANCE use, block id -> device id -> use (I19, §2.4). */
+    val otherAllowance: Map<String, Map<String, AllowanceUse>> = emptyMap(),
     /**
      * The last plan handed to the shield. A new plan is emitted when the projection differs
      * from this, not from the previous world's projection: schedules and lockdowns change the

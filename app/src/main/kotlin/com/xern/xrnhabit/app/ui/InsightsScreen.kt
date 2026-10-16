@@ -149,7 +149,7 @@ fun InsightsScreen(world: World, websites: WebsiteMonitor, siteUsage: SiteUsageL
             SectionLabel("xrnhabit")
             val historyDate = days?.takeIf { it.isNotEmpty() }?.let { it[selected.coerceIn(it.indices)].date } ?: LocalDate.now()
             HistoryCard(historyDate, history)
-            val usedMin = world.dailyUnlockUsedMs / 60_000
+            val usedMin = (world.dailyUnlockUsedMs + world.unlockLog.values.sum()) / 60_000 // I28
             val capMin = world.settings.dailyCapMs / 60_000
             HFCard {
                 Text(

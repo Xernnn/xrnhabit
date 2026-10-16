@@ -22,6 +22,7 @@ import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import com.xern.xrnhabit.app.data.SharedSync
 import com.xern.xrnhabit.app.data.WorldStore
 import com.xern.xrnhabit.app.loop.LoopHabits
 import com.xern.xrnhabit.app.ui.BlockOverlayContent
@@ -56,6 +57,7 @@ class OverlayShieldPort(
     private val context: Context,
     private val store: WorldStore,
     private val loop: LoopHabits,
+    private val shared: SharedSync,
     private val onEvent: (BlockEvent) -> Unit,
 ) : ShieldPort {
 
@@ -112,6 +114,8 @@ class OverlayShieldPort(
         // Hitting the shield re-reads Loop, so a missed push or a credit that lapsed unused (I24)
         // is caught now rather than at the next screen unlock.
         if (view == null && uiState.value?.items?.any { it.externalHabitId != null } == true) loop.sync()
+        // Likewise the laptop: an unlock redeemed there lifts this shield a moment later.
+        if (view == null) shared.request()
         show(focusable = !siteBlocked)
     }
 

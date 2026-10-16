@@ -13,6 +13,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import java.io.File
+import java.util.UUID
 
 /** Process-wide singletons. Created once in [com.xern.xrnhabit.app.XrnhabitApp]. */
 class AppContainer(context: Context) {
@@ -43,4 +44,16 @@ class AppContainer(context: Context) {
 
     /** Habit ticks from xrnloops, our Loop fork (`../xrnloops`), for checklist items linked to it (I23). */
     val loop = LoopHabits(context, store, appScope)
+
+    /** Unlocks, breaks and blocks shared with the laptop through the home server (contract §2.4). */
+    val shared = SharedSync(context, store, appScope)
+
+    init {
+        // This install's name in the shared state (whose allowance use is whose, §2.4).
+        if (store.world.value.deviceId.isEmpty()) {
+            val id = "phone-" + UUID.randomUUID().toString().take(8)
+            store.edit { it.copy(deviceId = id) }
+        }
+        shared.start()
+    }
 }

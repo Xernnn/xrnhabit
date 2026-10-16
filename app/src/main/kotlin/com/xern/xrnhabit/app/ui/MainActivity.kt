@@ -102,7 +102,7 @@ class MainActivity : ComponentActivity() {
                             InsightsScreen(world, container.websites, container.siteUsage, container.telemetry)
                         }
                         composable(Tab.Settings.route) {
-                            SettingsScreen(world, store, hardcoreGuard, container.websites, container.loop, container.clockGuard)
+                            SettingsScreen(world, store, hardcoreGuard, container.websites, container.loop, container.clockGuard, container.shared)
                         }
                         composable("createBlock") {
                             CreateBlockScreen(
@@ -150,6 +150,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         (application as XrnhabitApp).container.loop.sync()
+        (application as XrnhabitApp).container.shared.request()
     }
 }
 

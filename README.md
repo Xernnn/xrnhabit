@@ -2,7 +2,8 @@
 
 An Android self-control app: distracting apps (and, in the sideload build, websites) stay
 behind a full-screen block until you've done a habit, then open for a few minutes and lock
-again on their own. No accounts, no backend; everything stays on the phone.
+again on their own. No accounts, no cloud: everything stays on the phone, unless you turn on
+sync with a server of your own, which also brings the same blocks to a Linux laptop.
 
 ## What it does
 
@@ -21,6 +22,11 @@ again on their own. No accounts, no backend; everything stays on the phone.
   before an unlock ends, and says so if blocking stops working. A Quick Settings tile restarts
   your lockdowns.
 - **Backup.** Export your blocks to a file and import them on a new install.
+- **On the laptop too** (optional). With a small sync server of your own (`server/`), a
+  laptop daemon (`desktop/`, KDE Plasma 6) enforces the same blocks on websites (a browser
+  extension) and desktop apps. An unlock earned or redeemed on either device opens the block
+  on both; the daily unlock limit, the break and lockdowns are shared. See
+  [desktop/README.md](desktop/README.md).
 - **Insights.** Per-app screen time, habits done, times blocked and your streak, and in the
   sideload build per-site time.
 - Built to survive reboots, process death and OEM battery killers. Unlock countdowns run on a
@@ -57,7 +63,8 @@ reader (sideload only) is an Accessibility service that reads only the browser's
 so habit-linked checklist items need **xrnloops**, a small GPLv3 fork of Loop kept as a
 separate project. It shares today's ticks through a signature-protected content provider and
 pings xrnhabit whenever something is ticked. Both apps must be signed with the same key.
-xrnhabit itself contains no Loop code.
+xrnhabit itself contains no Loop code. xrnloops can also sync its habits with your server,
+which serves a web page for ticking and reviewing them from a laptop.
 
 ## Project layout
 
@@ -66,6 +73,8 @@ xrnhabit itself contains no Loop code.
 | `:domain` | The block engine: a pure Kotlin state machine with no Android dependencies, fully unit-tested |
 | `:app` | Compose UI, the foreground service that enforces blocks, persistence, permissions |
 | `:hardcore` | Device Admin receiver (sideload builds only) |
+| `:desktop` | The laptop daemon, its KWin script and browser extension |
+| `server/` | `xrnhabit-sync.py`, the tiny sync server (Python), and its status page |
 
-The engine's rules (states, transitions, invariants I1–I24) are specified in
+The engine's rules (states, transitions, invariants I1–I29, multi-device sync in §2.4) are specified in
 `docs/domain-contract.md`, which is in Vietnamese.

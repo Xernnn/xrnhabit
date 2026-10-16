@@ -76,6 +76,7 @@ class BlockerForegroundService : LifecycleService() {
                     awake.value = true
                     // Cheap safety net for a missed Loop push: re-read before the user can reach a blocked app.
                     container.loop.sync()
+                    container.shared.request()
                 }
                 Intent.ACTION_SCREEN_ON -> if (!keyguardLocked()) awake.value = true
                 // A hand-set clock change: book it before anything reads the time again.
@@ -98,6 +99,7 @@ class BlockerForegroundService : LifecycleService() {
             context = this,
             store = container.store,
             loop = container.loop,
+            shared = container.shared,
             onEvent = container.store::dispatch,
         )
         container.store.shield = overlay
@@ -141,6 +143,7 @@ class BlockerForegroundService : LifecycleService() {
         // 2. cold-start rebuild (I8), then catch up on Loop ticks made while we were down (I23)
         container.store.dispatch(BlockEvent.BootOrColdStart)
         container.loop.sync()
+        container.shared.request()
         lifecycleScope.launch(Dispatchers.IO) { container.telemetry.prune(container.clock.nowWallMs()) }
         container.unreadableWorldCopy?.let { copy ->
             notifications.alert(

@@ -50,21 +50,27 @@ class WorldStore(
     val effects: SharedFlow<Effect> = _effects.asSharedFlow()
 
     fun dispatch(event: BlockEvent) {
-        scope.launch {
-            mutex.withLock {
-                val outcome = engine.reduce(_world.value, event, clock)
-                applyOutcome(outcome, persist, shield, telemetry, clock.nowWallMs())
-                _world.value = outcome.world
-                outcome.effects.forEach { _effects.tryEmit(it) }
-            }
-        }
+        scope.launch { dispatchAndGet(event) }
     }
 
-    /** Structural edits (create a block, add a to-do item) that are not [BlockEvent]s. */
+    /** [dispatch], waiting for it: the world right after this event, before anything else ran. */
+    suspend fun dispatchAndGet(event: BlockEvent): World = mutex.withLock {
+        val outcome = engine.reduce(_world.value, event, clock)
+        applyOutcome(outcome, persist, shield, telemetry, clock.nowWallMs())
+        _world.value = outcome.world
+        outcome.effects.forEach { _effects.tryEmit(it) }
+        outcome.world
+    }
+
+    /**
+     * Structural edits (create a block, add a to-do item) that are not [BlockEvent]s. A block
+     * whose settings change is stamped with the time, so the later edit wins when two devices
+     * change it at once (contract §2.4).
+     */
     fun edit(transform: (World) -> World) {
         scope.launch {
             mutex.withLock {
-                val edited = transform(_world.value)
+                val edited = stampEdits(_world.value, transform(_world.value))
                 val plan = engine.shieldPlan(edited, clock)
                 val next = edited.copy(appliedShield = plan)
                 persist.save(next)
@@ -73,6 +79,17 @@ class WorldStore(
             }
         }
     }
+}
+
+private fun WorldStore.stampEdits(before: World, after: World): World {
+    val now = clock.nowWallMs()
+    val old = before.blocks.associateBy { it.id }
+    val blocks = after.blocks.map { b ->
+        val was = old[b.id]
+        val changed = was == null || was.copy(state = b.state, editedAtWall = b.editedAtWall) != b
+        if (changed) b.copy(editedAtWall = now) else b
+    }
+    return after.copy(blocks = blocks)
 }
 
 object NoopShield : ShieldPort {

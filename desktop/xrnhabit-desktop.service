@@ -1,0 +1,14 @@
+[Unit]
+Description=xrnhabit on the laptop: blocks apps and sites until your habits are done
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/share/xrnhabit-desktop/bin/xrnhabit-desktop
+Restart=always
+RestartSec=3
+# The JVM answers a stop's SIGTERM with 143 after its shutdown hook has saved the state.
+SuccessExitStatus=143
+
+[Install]
+WantedBy=graphical-session.target

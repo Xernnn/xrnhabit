@@ -32,6 +32,9 @@ object LoopContract {
     const val EXTRA_HABIT_UUID = "uuid"
 
     const val PATH_HABITS = "habits"
+
+    /** `call(AUTHORITY, METHOD_SYNC)`: xrnloops syncs with the home server first (a few seconds at most). */
+    const val METHOD_SYNC = "sync"
     const val PARAM_DATE = "date"
     const val COLUMN_UUID = "uuid"
     const val COLUMN_NAME = "name"
@@ -117,6 +120,16 @@ class LoopHabits(
         return null
     }
 
+    /**
+     * Asks xrnloops to sync with the home server before we read (it waits up to ~5 s). Older
+     * builds, or one with sync off, answer null or `synced = false`; the read goes ahead anyway.
+     */
+    private fun pullFromServer() {
+        if (status() != LoopStatus.READY) return
+        val uri = Uri.Builder().scheme("content").authority(LoopContract.AUTHORITY).build()
+        runCatching { context.contentResolver.call(uri, LoopContract.METHOD_SYNC, null, null) }
+    }
+
     private fun readOnce(date: LocalDate): List<LoopHabit>? {
         val uri = Uri.Builder()
             .scheme("content")
@@ -159,13 +172,15 @@ class LoopHabits(
      * Re-reads today's and yesterday's ticks and dispatches them, if any checklist item is
      * linked to Loop. [force] skips that check — for right after linking, when the `store.edit`
      * adding the item may not have landed yet (it will have by the time the read returns and we
-     * dispatch).
+     * dispatch). [fromServer] first has xrnloops sync with the home server, so a habit ticked
+     * on the laptop counts here too; skip it when xrnloops itself just reported a change.
      */
-    fun sync(force: Boolean = false, onDone: () -> Unit = {}) {
+    fun sync(force: Boolean = false, fromServer: Boolean = true, onDone: () -> Unit = {}) {
         val anyLinked = store.world.value.checklist.values.any { items -> items.any { it.externalHabitId != null } }
         if (!anyLinked && !force) return onDone()
         scope.launch(Dispatchers.IO) {
             try {
+                if (fromServer) pullFromServer()
                 val day = store.clock.localDate()
                 val today = read(day)
                 val yesterday = today?.let { read(day.minusDays(1)) }

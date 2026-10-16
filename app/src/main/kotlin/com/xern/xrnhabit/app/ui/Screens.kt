@@ -88,6 +88,7 @@ import com.xern.xrnhabit.app.data.BlocksBackups
 import com.xern.xrnhabit.app.data.ClockGuard
 import com.xern.xrnhabit.app.data.InstalledApps
 import com.xern.xrnhabit.app.data.OemAutostart
+import com.xern.xrnhabit.app.data.SharedSync
 import com.xern.xrnhabit.app.data.WorldStore
 import com.xern.xrnhabit.app.data.isGranted
 import com.xern.xrnhabit.app.data.settingsIntent
@@ -691,6 +692,7 @@ fun SettingsScreen(
     websites: WebsiteMonitor,
     loop: LoopHabits,
     clockGuard: ClockGuard,
+    shared: SharedSync,
 ) {
     val context = LocalContext.current
     val resumeSignal = rememberResumeSignal()
@@ -816,6 +818,8 @@ fun SettingsScreen(
                     }
                 }
             }
+
+            SyncCard(shared)
 
             HFCard {
                 Text("Daily unlock limit", style = MaterialTheme.typography.titleMedium)
@@ -972,6 +976,86 @@ private fun PasswordForm(askCurrent: Boolean, submitLabel: String, onSubmit: (cu
         onClick = { error = onSubmit(current, new) },
         modifier = Modifier.fillMaxWidth(),
     ) { Text(submitLabel) }
+}
+
+/** The home-server link that shares unlocks, breaks and blocks with the laptop (contract §2.4). */
+@Composable
+private fun SyncCard(shared: SharedSync) {
+    val settings = shared.settings
+    val status by shared.status.collectAsStateWithLifecycle()
+    var editing by remember { mutableStateOf(!settings.isConfigured) }
+    var url by remember { mutableStateOf(settings.url) }
+    var user by remember { mutableStateOf(settings.user.ifEmpty { "sonn" }) }
+    var password by remember { mutableStateOf(settings.password) }
+    var busy by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    HFCard {
+        Text("Sync with laptop", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Shares blocks, unlocks, breaks and lockdowns with xrnhabit on your laptop through your home server.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Gap(8)
+        if (editing) {
+            OutlinedTextField(
+                value = url,
+                onValueChange = { url = it },
+                label = { Text("Server address") },
+                placeholder = { Text("https://your-server/xrnhabit") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = user,
+                onValueChange = { user = it },
+                label = { Text("User") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = password,
+                onValueChange = { password = it },
+                label = { Text("Password") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Gap(8)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    enabled = url.trim().startsWith("http") && user.isNotBlank() && password.isNotEmpty() && !busy,
+                    onClick = {
+                        settings.save(url, user, password)
+                        editing = false
+                        busy = true
+                        scope.launch { shared.syncNow(); busy = false }
+                    },
+                ) { Text("Save and sync") }
+                if (settings.isConfigured) TextButton(onClick = { editing = false }) { Text("Cancel") }
+            }
+        } else {
+            rememberTicker(30_000)
+            Text(
+                when {
+                    busy -> "Syncing…"
+                    status == null -> "Connected to ${settings.url}"
+                    status!!.ok -> "Synced ${formatAgo(status!!.atWallMs)} · ${settings.url}"
+                    else -> "${status!!.message} (${formatAgo(status!!.atWallMs)})"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = if (status?.ok == false && !busy) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Gap(8)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(enabled = !busy, onClick = { busy = true; scope.launch { shared.syncNow(); busy = false } }) { Text("Sync now") }
+                TextButton(onClick = { editing = true }) { Text("Change") }
+            }
+        }
+    }
 }
 
 /** "just now", "5 min ago", "2 h ago". */

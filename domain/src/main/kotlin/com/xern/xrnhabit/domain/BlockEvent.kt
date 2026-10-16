@@ -47,6 +47,13 @@ sealed interface BlockEvent {
     /** Ends the running break early (I25). */
     data object EndPause : BlockEvent
 
+    /**
+     * The shared state as the sync server has it ([remote]) and as this device last agreed with
+     * it ([base], null the first time). The engine merges it three ways with this device's own
+     * and adopts the result (contract §2.4, I26, I27).
+     */
+    data class SharedStateMerged(val base: SharedState?, val remote: SharedState) : BlockEvent
+
     /** Process cold start or BOOT_COMPLETED — rebuild state and re-apply the shield (I8). */
     data object BootOrColdStart : BlockEvent
 }
