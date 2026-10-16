@@ -938,8 +938,11 @@ class InvariantTests {
         laptop.sync(server)
 
         advanceAll(5L * 60_000, phone, laptop) // both see the same session run out
-        phone.on(BlockEvent.Tick)
-        laptop.on(BlockEvent.Tick)
+        val endedOnPhone = phone.on(BlockEvent.Tick).effects.filterIsInstance<Effect.UnlockConsumed>().single()
+        val endedOnLaptop = laptop.on(BlockEvent.Tick).effects.filterIsInstance<Effect.UnlockConsumed>().single()
+        // Each logs it, under the session's one start, so a history across devices counts it once too.
+        assertEquals(endedOnPhone.startedAtWall, endedOnLaptop.startedAtWall)
+        assertTrue(endedOnPhone.startedAtWall > 0)
         phone.sync(server)
         laptop.sync(server)
         phone.sync(server)

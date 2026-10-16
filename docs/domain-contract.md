@@ -214,10 +214,10 @@ interface ShieldPort {
     fun apply(plan: ShieldPlan)                  // ShieldPlan(blockedPackages, blockedSites) — trạng thái mong muốn đầy đủ
 }
 
-interface Telemetry {                            // local-only, cho Insights
+interface Telemetry {                            // cho Insights; khi bật sync, còn gửi lên server của người dùng (trang Review)
     fun onBlockedImpression(pkg: String, atWallMs: Long)
     fun onHabitCompleted(blockId: String, atWallMs: Long)
-    fun onUnlockConsumed(blockId: String, ms: Long, atWallMs: Long)
+    fun onUnlockConsumed(blockId: String, ms: Long, atWallMs: Long, startedAtWall: Long)  // startedAtWall: tên phiên (I28), các thiết bị cùng phiên ghi cùng một tên
 }
 ```
 

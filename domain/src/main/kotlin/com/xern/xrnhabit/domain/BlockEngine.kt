@@ -486,7 +486,7 @@ class BlockEngine {
                         val timeUp = monoElapsed >= s.durationMs
                         if (tamper || timeUp) {
                             val consumed = monoElapsed.coerceIn(0, s.durationMs)
-                            effects += Effect.UnlockConsumed(block.id, consumed)
+                            effects += Effect.UnlockConsumed(block.id, consumed, s.startedAtWall)
                             if (tamper) effects += Effect.TamperDetected(block.id)
                             val reset = returnToArmed(w, block, clock)
                             // I28: keyed by session, so another device ending the same one counts it once.

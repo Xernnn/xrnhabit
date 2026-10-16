@@ -120,10 +120,11 @@ class DesktopTest {
         val day = 86_400_000L
         log.onBlockedImpression("org.kde.kcalc", 1_000)
         log.onHabitCompleted("b1", 200 * day)
-        log.onUnlockConsumed("b1", 300_000, 200 * day + 1)
+        log.onUnlockConsumed("b1", 300_000, 200 * day + 1, 200 * day - 299_999)
         val after = log.eventsAfter(1_000)
         assertEquals(listOf("habit", "unlock"), after.map { it["t"]!!.jsonPrimitive.content })
         assertEquals(300_000L, after[1]["ms"]!!.jsonPrimitive.long)
+        assertEquals(200 * day - 299_999, after[1]["start"]!!.jsonPrimitive.long)
         log.prune(nowWallMs = 200 * day, keepDays = 120)
         assertEquals(2, log.eventsAfter(0).size) // the blocked event at 1 s was 200 days old
     }

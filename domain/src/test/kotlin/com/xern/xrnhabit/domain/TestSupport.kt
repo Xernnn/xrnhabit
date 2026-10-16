@@ -69,7 +69,7 @@ class RecordingShield(private val log: MutableList<String>) : ShieldPort {
 object NoopTelemetry : Telemetry {
     override fun onBlockedImpression(pkg: String, atWallMs: Long) = Unit
     override fun onHabitCompleted(blockId: String, atWallMs: Long) = Unit
-    override fun onUnlockConsumed(blockId: String, ms: Long, atWallMs: Long) = Unit
+    override fun onUnlockConsumed(blockId: String, ms: Long, atWallMs: Long, startedAtWall: Long) = Unit
 }
 
 // ---- builders -------------------------------------------------------------------------

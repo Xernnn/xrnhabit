@@ -135,7 +135,7 @@ class SyncServerTest(unittest.TestCase):
         now = int(time.time() * 1000)
         batch = {"events": [
             {"t": "blocked", "at": now - 5000, "target": "com.example.game", "name": "Game"},
-            {"t": "unlock", "at": now - 1000, "block": "b1", "ms": 300000},
+            {"t": "unlock", "at": now - 1000, "block": "b1", "ms": 300000, "start": now - 301000},
             {"t": "nonsense", "at": now},  # dropped
         ]}
         status, body, _ = self.call("POST", "/events", batch, {"X-Device": "phone"})
@@ -148,6 +148,7 @@ class SyncServerTest(unittest.TestCase):
         got = json.loads(body)["events"]
         self.assertEqual([("laptop", "unlock", 300000), ("phone", "unlock", 300000)],
                          sorted((e["d"], e["t"], e["ms"]) for e in got))
+        self.assertEqual({now - 301000}, {e["start"] for e in got})  # one session, logged by both
 
 
 if __name__ == "__main__":

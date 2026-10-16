@@ -42,7 +42,8 @@ interface ShieldPort {
 interface Telemetry {
     fun onBlockedImpression(pkg: String, atWallMs: Long)
     fun onHabitCompleted(blockId: String, atWallMs: Long)
-    fun onUnlockConsumed(blockId: String, ms: Long, atWallMs: Long)
+    /** [startedAtWall] names the session (I28): devices sharing it each log it, under one name. */
+    fun onUnlockConsumed(blockId: String, ms: Long, atWallMs: Long, startedAtWall: Long)
 }
 
 /**
@@ -61,7 +62,7 @@ enum class RejectReason { NOT_EARNED, CAP_REACHED }
 sealed interface Effect {
     data class BlockedImpression(val pkg: String) : Effect
     data class HabitCompleted(val blockId: String) : Effect
-    data class UnlockConsumed(val blockId: String, val ms: Long) : Effect
+    data class UnlockConsumed(val blockId: String, val ms: Long, val startedAtWall: Long = 0) : Effect
     data class UnlockEndingSoon(val blockId: String, val remainingMs: Long) : Effect
     data class TamperDetected(val blockId: String) : Effect
     data class RedeemRejected(val blockId: String, val reason: RejectReason) : Effect
@@ -94,7 +95,7 @@ fun applyOutcome(
         when (effect) {
             is Effect.BlockedImpression -> telemetry.onBlockedImpression(effect.pkg, nowWallMs)
             is Effect.HabitCompleted -> telemetry.onHabitCompleted(effect.blockId, nowWallMs)
-            is Effect.UnlockConsumed -> telemetry.onUnlockConsumed(effect.blockId, effect.ms, nowWallMs)
+            is Effect.UnlockConsumed -> telemetry.onUnlockConsumed(effect.blockId, effect.ms, nowWallMs, effect.startedAtWall)
             is Effect.UnlockEndingSoon,
             is Effect.TamperDetected,
             is Effect.RedeemRejected -> Unit // routed to notifications / UI by the caller

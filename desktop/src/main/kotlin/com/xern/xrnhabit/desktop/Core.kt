@@ -182,7 +182,7 @@ class FilePersist(private val file: File, private val clock: Clock) : PersistPor
 object NoTelemetry : Telemetry {
     override fun onBlockedImpression(pkg: String, atWallMs: Long) = Unit
     override fun onHabitCompleted(blockId: String, atWallMs: Long) = Unit
-    override fun onUnlockConsumed(blockId: String, ms: Long, atWallMs: Long) = Unit
+    override fun onUnlockConsumed(blockId: String, ms: Long, atWallMs: Long, startedAtWall: Long) = Unit
 }
 
 /**
@@ -193,7 +193,8 @@ object NoTelemetry : Telemetry {
 class FileTelemetry(private val file: File) : Telemetry {
     override fun onBlockedImpression(pkg: String, atWallMs: Long) = append("blocked;$pkg;$atWallMs")
     override fun onHabitCompleted(blockId: String, atWallMs: Long) = append("habit;$blockId;$atWallMs")
-    override fun onUnlockConsumed(blockId: String, ms: Long, atWallMs: Long) = append("unlock;$blockId;$ms;$atWallMs")
+    override fun onUnlockConsumed(blockId: String, ms: Long, atWallMs: Long, startedAtWall: Long) =
+        append("unlock;$blockId;$ms;$atWallMs;$startedAtWall")
 
     @Synchronized
     private fun append(line: String) {
@@ -229,6 +230,7 @@ class FileTelemetry(private val file: File) : Telemetry {
             "unlock" -> {
                 val ms = f.getOrNull(2)?.toLongOrNull()
                 val at = f.getOrNull(3)?.toLongOrNull()
+                val start = f.getOrNull(4)?.toLongOrNull() ?: 0
                 if (ms == null || at == null) {
                     null
                 } else {
@@ -237,6 +239,7 @@ class FileTelemetry(private val file: File) : Telemetry {
                         put("at", at)
                         put("block", f[1])
                         put("ms", ms)
+                        if (start > 0) put("start", start)
                     }
                 }
             }
@@ -249,7 +252,7 @@ class FileTelemetry(private val file: File) : Telemetry {
     fun prune(nowWallMs: Long, keepDays: Int = 120) {
         val cutoff = nowWallMs - keepDays * 86_400_000L
         val lines = lines()
-        val kept = lines.filter { line -> line.split(';').last().toLongOrNull()?.let { it >= cutoff } != false }
+        val kept = lines.filter { line -> eventTime(line)?.let { it >= cutoff } != false }
         if (kept.size == lines.size) return
         val tmp = File(file.path + ".tmp")
         tmp.writeText(kept.joinToString("") { it + "\n" })
@@ -257,6 +260,12 @@ class FileTelemetry(private val file: File) : Telemetry {
     }
 
     private fun lines(): List<String> = runCatching { file.readLines() }.getOrDefault(emptyList())
+
+    /** When a line's event happened: the third field, or the fourth for an unlock. */
+    private fun eventTime(line: String): Long? {
+        val f = line.split(';')
+        return (if (f.firstOrNull() == "unlock") f.getOrNull(3) else f.getOrNull(2))?.toLongOrNull()
+    }
 }
 
 /**

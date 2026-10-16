@@ -181,8 +181,9 @@ def clean_event(raw, device):
     for k in ("block", "target", "name"):
         if isinstance(raw.get(k), str) and raw[k]:
             e[k] = raw[k][:200]
-    if isinstance(raw.get("ms"), int) and raw["ms"] >= 0:
-        e["ms"] = raw["ms"]
+    for k in ("ms", "start"):  # start: an unlock's session (I28), the same on every device that logs it
+        if isinstance(raw.get(k), int) and raw[k] >= 0:
+            e[k] = raw[k]
     return e
 
 

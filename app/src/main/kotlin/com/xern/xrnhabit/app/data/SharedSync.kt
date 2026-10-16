@@ -245,6 +245,7 @@ class SharedSync(
                                 put("t", "unlock")
                                 put("block", e.blockId)
                                 put("ms", e.ms)
+                                if (e.startedAtWall > 0) put("start", e.startedAtWall)
                             }
                         }
                     }

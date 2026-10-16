@@ -14,8 +14,8 @@ sealed interface TelemetryEvent {
     /** A habit block's habit was done (ARMED → EARNED). */
     data class HabitDone(val blockId: String, override val atWallMs: Long) : TelemetryEvent
 
-    /** An unlock ended after [ms] of use. */
-    data class UnlockUsed(val blockId: String, val ms: Long, override val atWallMs: Long) : TelemetryEvent
+    /** An unlock ended after [ms] of use; [startedAtWall] names the session (0 in old lines). */
+    data class UnlockUsed(val blockId: String, val ms: Long, override val atWallMs: Long, val startedAtWall: Long = 0) : TelemetryEvent
 }
 
 /**
@@ -27,8 +27,8 @@ class LocalTelemetry(private val file: File) : Telemetry {
 
     override fun onBlockedImpression(pkg: String, atWallMs: Long) = append("blocked;$pkg;$atWallMs")
     override fun onHabitCompleted(blockId: String, atWallMs: Long) = append("habit;$blockId;$atWallMs")
-    override fun onUnlockConsumed(blockId: String, ms: Long, atWallMs: Long) =
-        append("unlock;$blockId;$ms;$atWallMs")
+    override fun onUnlockConsumed(blockId: String, ms: Long, atWallMs: Long, startedAtWall: Long) =
+        append("unlock;$blockId;$ms;$atWallMs;$startedAtWall")
 
     @Synchronized
     private fun append(line: String) {
@@ -67,7 +67,7 @@ class LocalTelemetry(private val file: File) : Telemetry {
             "unlock" -> {
                 val ms = f.getOrNull(2)?.toLongOrNull()
                 val at = f.getOrNull(3)?.toLongOrNull()
-                if (ms != null && at != null) TelemetryEvent.UnlockUsed(f[1], ms, at) else null
+                if (ms != null && at != null) TelemetryEvent.UnlockUsed(f[1], ms, at, f.getOrNull(4)?.toLongOrNull() ?: 0) else null
             }
             else -> null
         }
