@@ -28,3 +28,6 @@ local.properties
 *.swp
 .DS_Store
 Thumbs.db
+
+# Planning notes: kept locally, not published
+brainstorm-*.md
