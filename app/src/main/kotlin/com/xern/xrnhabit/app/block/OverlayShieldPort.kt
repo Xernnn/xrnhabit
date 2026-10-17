@@ -22,6 +22,7 @@ import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import com.xern.xrnhabit.app.data.SharedSync
 import com.xern.xrnhabit.app.data.WorldStore
 import com.xern.xrnhabit.app.loop.LoopHabits
 import com.xern.xrnhabit.app.ui.BlockOverlayContent
@@ -32,10 +33,14 @@ import com.xern.xrnhabit.domain.BlockEvent
 import com.xern.xrnhabit.domain.BlockMode
 import com.xern.xrnhabit.domain.BlockState
 import com.xern.xrnhabit.domain.ChecklistItem
+import com.xern.xrnhabit.domain.RejectReason
 import com.xern.xrnhabit.domain.ShieldPlan
 import com.xern.xrnhabit.domain.ShieldPort
 import com.xern.xrnhabit.domain.Sites
 import com.xern.xrnhabit.domain.World
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * The enforcement surface (brainstorm §4.3): a `TYPE_APPLICATION_OVERLAY` window rather than a
@@ -55,6 +60,7 @@ class OverlayShieldPort(
     private val context: Context,
     private val store: WorldStore,
     private val loop: LoopHabits,
+    private val shared: SharedSync,
     private val onEvent: (BlockEvent) -> Unit,
 ) : ShieldPort {
 
@@ -65,6 +71,14 @@ class OverlayShieldPort(
 
     private var view: View? = null
     private var params: WindowManager.LayoutParams? = null
+
+    private val _visible = MutableStateFlow(false)
+
+    /** Whether a block screen is up; the service syncs faster while it is. */
+    val visible: StateFlow<Boolean> = _visible.asStateFlow()
+
+    /** Whether the block screen shows an item ticked in xrnloops. */
+    val showsLinkedItem: Boolean get() = uiState.value?.items?.any { it.externalHabitId != null } == true
     private var windowOwner: OverlayWindowOwner? = null
     private val uiState = mutableStateOf<OverlayUi?>(null)
 
@@ -98,10 +112,21 @@ class OverlayShieldPort(
                 ?.takeIf { it.isNotEmpty() }
                 ?.joinToString(" or ") { appLabel(it) },
             freeAtWall = block?.let { freeAtWall(it, world, engine, clock) },
+            freeInMs = block?.let { freeAtWall(it, world, engine, clock) }?.let { it - clock.nowWallMs() },
             allowanceMs = block?.takeIf { it.mode == BlockMode.ALLOWANCE }?.dailyAllowanceMs,
+            timerMs = block?.let { world.progress[it.id]?.accumulatedMs } ?: 0,
+            timerRunning = block?.let { world.progress[it.id]?.timerRunning } == true,
+            redeemRejection = block?.takeIf { it.state == BlockState.EARNED }?.let { engine.redeemRejection(world, it.id, clock) },
+            unlockUsedTodayMs = engine.unlockUsedTodayMs(world, clock),
+            dailyCapMs = world.settings.dailyCapMs,
         )
         // If the OS dropped our window out from under us, rebuild it.
         if (view != null && view?.isAttachedToWindow != true) hide()
+        // Hitting the shield re-reads Loop, so a missed push or a credit that lapsed unused (I24)
+        // is caught now rather than at the next screen unlock.
+        if (view == null && showsLinkedItem) loop.sync()
+        // Likewise the laptop: an unlock redeemed there lifts this shield a moment later.
+        if (view == null) shared.request()
         show(focusable = !siteBlocked)
     }
 
@@ -131,13 +156,15 @@ class OverlayShieldPort(
 
         val owner = OverlayWindowOwner().also { it.onCreate() }
         // Opening Loop moves the foreground off the blocked app, which drops the overlay.
-        val openLoop = loop.launchIntent()?.let { intent -> { runCatching { context.startActivity(intent) }; Unit } }
+        val openLoop: ((String) -> Unit)? = loop.launchIntent()?.let {
+            { uuid -> loop.openHabitIntent(uuid)?.let { runCatching { context.startActivity(it) } }; Unit }
+        }
         val composeView = ComposeView(context).apply {
             setContent {
                 BlockOverlayContent(
                     ui = uiState.value,
                     onToggleItem = { id, done -> onEvent(BlockEvent.ToggleChecklistItem(id, done)) },
-                    onStartTimer = { blockId -> onEvent(BlockEvent.TimerControl(blockId, running = true)) },
+                    onSetTimer = { blockId, running -> onEvent(BlockEvent.TimerControl(blockId, running)) },
                     onRedeem = { blockId -> onEvent(BlockEvent.Redeem(blockId)) },
                     onLeave = { leave(uiState.value?.isSite == true) },
                     onOpenLoop = openLoop,
@@ -177,6 +204,7 @@ class OverlayShieldPort(
 
         runCatching { wm.addView(host, layout) }
         view = host
+        _visible.value = true
         params = layout
         windowOwner = owner
         owner.onStart()
@@ -185,6 +213,7 @@ class OverlayShieldPort(
     private fun hide() {
         view?.let { v -> runCatching { wm.removeView(v) } }
         view = null
+        _visible.value = false
         params = null
         windowOwner?.onDestroy()
         windowOwner = null
@@ -212,8 +241,17 @@ class OverlayShieldPort(
         val habitAppLabel: String? = null,
         /** Non-HABIT blocks: when the block lets go (wall ms), if known. */
         val freeAtWall: Long? = null,
+        /** The same, as time from now. */
+        val freeInMs: Long? = null,
         /** ALLOWANCE blocks: the daily allowance that has been used up. */
         val allowanceMs: Long? = null,
+        /** TIMER / COMBINED: time counted so far, and whether the timer is running. */
+        val timerMs: Long = 0,
+        val timerRunning: Boolean = false,
+        /** EARNED blocks: why "Open" wouldn't go through right now, if it wouldn't (I9). */
+        val redeemRejection: RejectReason? = null,
+        val unlockUsedTodayMs: Long = 0,
+        val dailyCapMs: Long = 0,
     )
 }
 

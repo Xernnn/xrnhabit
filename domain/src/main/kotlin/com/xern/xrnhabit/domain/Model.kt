@@ -13,9 +13,9 @@ import kotlinx.serialization.Serializable
 
 enum class BlockState { ARMED, EARNED, UNLOCKED }
 
-enum class TriggerType { TIMER, COUNT, CHECKLIST, COMBINED }
+enum class TriggerType { TIMER, CHECKLIST, COMBINED }
 
-enum class TriggerUnit { MS, TIMES, ITEMS }
+enum class TriggerUnit { MS, ITEMS }
 
 enum class EnforcementTier { SOFT, HARDCORE }
 
@@ -28,6 +28,12 @@ enum class CombineMode { AND, OR }
  */
 enum class BlockMode { HABIT, ALLOWANCE, SCHEDULE, LOCKDOWN }
 
+/**
+ * Which day's external tick a linked [ChecklistItem] counts (I23). [YESTERDAY] is for habits
+ * ticked at the end of the day: last night's tick pays for today's unlock.
+ */
+enum class LinkedDay { TODAY, YESTERDAY }
+
 /** Contract defaults (§3). Settings can override per install; these are the fallback. */
 object Defaults {
     const val CREDIT_TTL_MS = 2L * 60 * 60 * 1000        // I1
@@ -35,6 +41,7 @@ object Defaults {
     const val SKEW_TOLERANCE_MS = 5_000L                 // I3
     const val UNLOCK_WARNING_MS = 30_000L                // G3
     const val DEFAULT_UNLOCK_MS = 5L * 60 * 1000
+    const val PAUSE_MS = 15L * 60 * 1000                 // I25
     const val ALL_ITEMS = -1L                            // trigger.requiredAmount sentinel (I11)
 }
 
@@ -88,6 +95,11 @@ data class Block(
     val targetCategories: Set<String> = emptySet(),
     /** Normalized domains (see [Sites.normalize]); each also covers its subdomains (I18). */
     val targetSites: Set<String> = emptySet(),
+    /**
+     * Laptop apps, by the `.desktop` id KWin reports (e.g. `steam`). Targets like
+     * [targetPackages] (I29); the phone never sees them in the foreground.
+     */
+    val targetDesktopApps: Set<String> = emptySet(),
     val trigger: Trigger,
     val reward: Reward = Reward(),
     val schedule: Schedule = Schedule.ALWAYS,
@@ -98,6 +110,22 @@ data class Block(
     val dailyAllowanceMs: Long = 0,
     /** [BlockMode.LOCKDOWN]: length of one lockdown, reused when it is started again (I21). */
     val lockdownMs: Long = 0,
+    /** Wall-clock ms of the last edit; the later edit wins when two devices change a block at once (§2.4). */
+    val editedAtWall: Long = 0,
+) {
+    /** Everything this block blocks that can be "the foreground app": phone packages and laptop apps. */
+    val targetApps: Set<String> get() = targetPackages + targetDesktopApps
+}
+
+/**
+ * A short break from every SOFT block that isn't a lockdown (I25). Counted down on the monotonic
+ * clock, like [Lockdown].
+ */
+@Serializable
+data class Pause(
+    val startedAtMonotonic: Long,
+    val startedAtWall: Long,
+    val durationMs: Long,
 )
 
 /** A running [BlockMode.LOCKDOWN]. Counted down on the monotonic clock, like [UnlockSession] (I21). */
@@ -122,7 +150,15 @@ data class ChecklistItem(
      * [BlockEvent.ExternalHabitsSynced] ticks it, never the user (I23).
      */
     val externalHabitId: String? = null,
-    /** Local epoch day this linked item's tick last paid for a credit; kept across resets (I24). */
+    /** Linked items only: whether today's or yesterday's external tick counts (I23). */
+    val linkedDay: LinkedDay = LinkedDay.TODAY,
+    /**
+     * Linked items only: count the day when the tracker says the habit's goal is met, not just
+     * when it was ticked that day — for "3 times a week" habits, whose goal covers days without a
+     * tick of their own (I23).
+     */
+    val countsGoal: Boolean = false,
+    /** Local epoch day this linked item's tick last paid for an unlock; kept across resets (I24). */
     val spentEpochDay: Long? = null,
 )
 
@@ -130,7 +166,6 @@ data class ChecklistItem(
 data class HabitProgress(
     val blockId: String,
     val accumulatedMs: Long = 0,
-    val count: Long = 0,
     /** Wall-clock ms of local start-of-day this progress window belongs to (I13). */
     val windowStart: Long,
     /** Monotonic ms marker of the last timer accrual (I4). */
@@ -157,7 +192,14 @@ data class UnlockSession(
     val startedAtMonotonic: Long,
     val startedAtWall: Long,
     val durationMs: Long,
-)
+) {
+    /** Names this session on every device, for the [World.unlockLog] (I28). */
+    val key: String get() = "$blockId@$startedAtWall"
+}
+
+/** One device's ALLOWANCE use of a block on the local day starting at [dayStartWall] (I19, §2.4). */
+@Serializable
+data class AllowanceUse(val dayStartWall: Long, val ms: Long)
 
 @Serializable
 data class Settings(
@@ -177,14 +219,25 @@ data class World(
     val credits: Map<String, EarnedCredit> = emptyMap(),
     val sessions: Map<String, UnlockSession> = emptyMap(),
     val checklist: Map<String, List<ChecklistItem>> = emptyMap(),
+    /** Unlock time used today before [unlockLog] existed; only old data has it (I9, I28). */
     val dailyUnlockUsedMs: Long = 0,
-    /** Epoch-day number the [dailyUnlockUsedMs] counter applies to. */
+    /** Epoch-day number [dailyUnlockUsedMs] and [unlockLog] apply to. */
     val dailyUsageEpochDay: Long = 0,
+    /** Consumed unlock time per ended session today, keyed by [UnlockSession.key] (I28). */
+    val unlockLog: Map<String, Long> = emptyMap(),
     val foregroundPkg: String? = null,
     /** Host shown in [foregroundPkg] when that is a browser and its address bar could be read (I18). */
     val foregroundSite: String? = null,
     val lockdowns: Map<String, Lockdown> = emptyMap(),
+    /** The running break, if any (I25). */
+    val pause: Pause? = null,
+    /** Local epoch day the last break was taken; one a day (I25). */
+    val lastPauseEpochDay: Long? = null,
     val settings: Settings = Settings(),
+    /** This install's id in the shared state (§2.4); empty until the app assigns one. */
+    val deviceId: String = "",
+    /** Other devices' ALLOWANCE use, block id -> device id -> use (I19, §2.4). */
+    val otherAllowance: Map<String, Map<String, AllowanceUse>> = emptyMap(),
     /**
      * The last plan handed to the shield. A new plan is emitted when the projection differs
      * from this, not from the previous world's projection: schedules and lockdowns change the

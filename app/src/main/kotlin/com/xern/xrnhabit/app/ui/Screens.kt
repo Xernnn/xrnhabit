@@ -3,8 +3,11 @@
 package com.xern.xrnhabit.app.ui
 
 import android.app.Activity
+import android.content.Intent
 import android.os.Build
 import android.text.format.DateFormat
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -26,17 +29,19 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.outlined.FreeBreakfast
 import androidx.compose.material.icons.outlined.Inbox
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -57,10 +62,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TimeInput
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -75,12 +82,13 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.xern.xrnhabit.app.web.WebsiteMonitor
-import com.xern.xrnhabit.app.web.WebsiteTracking
-import com.xern.xrnhabit.app.web.tracking
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.xern.xrnhabit.app.data.AppPermission
+import com.xern.xrnhabit.app.data.BlocksBackups
+import com.xern.xrnhabit.app.data.ClockGuard
 import com.xern.xrnhabit.app.data.InstalledApps
 import com.xern.xrnhabit.app.data.OemAutostart
+import com.xern.xrnhabit.app.data.SharedSync
 import com.xern.xrnhabit.app.data.WorldStore
 import com.xern.xrnhabit.app.data.isGranted
 import com.xern.xrnhabit.app.data.settingsIntent
@@ -88,7 +96,11 @@ import com.xern.xrnhabit.app.hardcore.HardcoreGuard
 import com.xern.xrnhabit.app.loop.LoopHabit
 import com.xern.xrnhabit.app.loop.LoopHabits
 import com.xern.xrnhabit.app.loop.LoopStatus
+import com.xern.xrnhabit.app.web.WebsiteMonitor
+import com.xern.xrnhabit.app.web.WebsiteTracking
+import com.xern.xrnhabit.app.web.tracking
 import com.xern.xrnhabit.domain.Block
+import com.xern.xrnhabit.domain.BlockEdits
 import com.xern.xrnhabit.domain.BlockEvent
 import com.xern.xrnhabit.domain.BlockMode
 import com.xern.xrnhabit.domain.BlockState
@@ -96,6 +108,8 @@ import com.xern.xrnhabit.domain.ChecklistItem
 import com.xern.xrnhabit.domain.CombineMode
 import com.xern.xrnhabit.domain.Defaults
 import com.xern.xrnhabit.domain.EnforcementTier
+import com.xern.xrnhabit.domain.LinkedDay
+import com.xern.xrnhabit.domain.RejectReason
 import com.xern.xrnhabit.domain.Reward
 import com.xern.xrnhabit.domain.Schedule
 import com.xern.xrnhabit.domain.Sites
@@ -104,6 +118,10 @@ import com.xern.xrnhabit.domain.Trigger
 import com.xern.xrnhabit.domain.TriggerType
 import com.xern.xrnhabit.domain.TriggerUnit
 import com.xern.xrnhabit.domain.World
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.time.LocalDate
 import java.util.UUID
 
 // =====================================================================================
@@ -114,6 +132,7 @@ import java.util.UUID
 fun BlocksScreen(
     world: World,
     store: WorldStore,
+    guard: HardcoreGuard,
     onOpenBlock: (String) -> Unit,
     onCreateBlock: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -124,12 +143,33 @@ fun BlocksScreen(
     val blockingBroken = remember(resume) {
         !AppPermission.USAGE_ACCESS.isGranted(context) || !AppPermission.OVERLAY.isGranted(context)
     }
+    var loosen by remember { mutableStateOf<LoosenRequest?>(null) }
+    var breakUsed by remember { mutableStateOf(false) }
+    val pauseLeft = store.engine.pauseRemainingMs(world, store.clock)
+    if (pauseLeft > 0) rememberTicker()
 
     Scaffold(
         topBar = {
             HFTopAppBar(
                 title = { Text("xrnhabit") },
                 actions = {
+                    // A break only lifts soft blocks (I25); with none, there's nothing to offer.
+                    if (pauseLeft == 0L && world.blocks.any(store.engine::pausable)) {
+                        IconButton(onClick = {
+                            if (store.engine.canPause(world, store.clock)) {
+                                loosen = LoosenRequest(
+                                    title = "Take a ${formatDuration(Defaults.PAUSE_MS)} break?",
+                                    detail = "Soft blocks stop blocking for ${formatDuration(Defaults.PAUSE_MS)}. " +
+                                        "You get one break a day. Hardcore blocks and lockdowns stay on.",
+                                    hardcore = false,
+                                ) { store.dispatch(BlockEvent.StartPause()) }
+                            } else {
+                                breakUsed = true
+                            }
+                        }) {
+                            Icon(Icons.Outlined.FreeBreakfast, contentDescription = "Take a break")
+                        }
+                    }
                     IconButton(onClick = onCreateBlock) {
                         Icon(Icons.Filled.Add, contentDescription = "New block")
                     }
@@ -145,6 +185,12 @@ fun BlocksScreen(
             if (blockingBroken) {
                 item {
                     SetupBanner(onClick = onOpenSettings)
+                }
+            }
+
+            if (pauseLeft > 0) {
+                item {
+                    PauseBanner(leftMs = pauseLeft, onEnd = { store.dispatch(BlockEvent.EndPause) })
                 }
             }
 
@@ -171,6 +217,35 @@ fun BlocksScreen(
                     onToggleTimer = { running -> store.dispatch(BlockEvent.TimerControl(block.id, running)) },
                 )
             }
+        }
+    }
+
+    loosen?.let { request -> LoosenGuardDialog(request, guard, onDismiss = { loosen = null }) }
+    if (breakUsed) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { breakUsed = false },
+            title = { Text("No more breaks today") },
+            text = { Text("You've had today's break. The next one is available tomorrow.") },
+            confirmButton = { TextButton(onClick = { breakUsed = false }) { Text("OK") } },
+        )
+    }
+}
+
+@Composable
+private fun PauseBanner(leftMs: Long, onEnd: () -> Unit) {
+    HFCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Outlined.FreeBreakfast, contentDescription = null, tint = statusStyleFor(BlockState.UNLOCKED).accent)
+            WGap(12)
+            Column(Modifier.weight(1f)) {
+                Text("On a break", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Soft blocks are back in ${formatRemaining(leftMs)}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            TextButton(onClick = onEnd) { Text("End now") }
         }
     }
 }
@@ -238,10 +313,14 @@ private fun BlockCard(
         Gap(14)
         when {
             block.state == BlockState.EARNED -> {
-                Button(onClick = onRedeem, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null)
-                    WGap(8)
-                    Text("Open for ${block.reward.unlockDurationMs / 60_000} min")
+                if (store.engine.redeemRejection(world, block.id, store.clock) == RejectReason.CAP_REACHED) {
+                    CapReachedNote(block, world, store)
+                } else {
+                    Button(onClick = onRedeem, modifier = Modifier.fillMaxWidth()) {
+                        Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null)
+                        WGap(8)
+                        Text("Open for ${block.reward.unlockDurationMs / 60_000} min")
+                    }
                 }
             }
             block.trigger.type == TriggerType.TIMER || block.trigger.type == TriggerType.COMBINED -> {
@@ -262,6 +341,16 @@ private fun BlockCard(
     }
 }
 
+/** Shown instead of "Open" when the unlock would go past today's limit (I9). */
+@Composable
+private fun CapReachedNote(block: Block, world: World, store: WorldStore) {
+    Text(
+        capReachedText(store.engine.unlockUsedTodayMs(world, store.clock), world.settings.dailyCapMs, block.reward.unlockDurationMs),
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
 // =====================================================================================
 //  Block detail
 // =====================================================================================
@@ -272,6 +361,7 @@ fun BlockDetailScreen(
     store: WorldStore,
     blockId: String,
     onBack: () -> Unit,
+    onEdit: () -> Unit,
     guard: HardcoreGuard,
     loop: LoopHabits,
 ) {
@@ -285,6 +375,24 @@ fun BlockDetailScreen(
     }
     var confirmDelete by remember { mutableStateOf(false) }
     var pickingLoopHabit by remember { mutableStateOf(false) }
+    var loosen by remember { mutableStateOf<LoosenRequest?>(null) }
+    val guarded = BlockEdits.guardNeeded(store.engine, world, block, store.clock)
+    val hardcore = block.enforcementTier == EnforcementTier.HARDCORE
+
+    /** Runs [action] at once if this block is inert, otherwise after the guard (contract §2.3). */
+    fun loosening(title: String, detail: String, action: () -> Unit) {
+        if (guarded) loosen = LoosenRequest(title, detail, hardcore, action) else action()
+    }
+
+    // Which linked habits aren't every-day ones, so the "Goal days" choice is offered only there.
+    val linkedIds = world.items(block.id).mapNotNull { it.externalHabitId }
+    var nonDaily by remember { mutableStateOf(emptySet<String>()) }
+    LaunchedEffect(linkedIds.isNotEmpty()) {
+        if (linkedIds.isEmpty()) return@LaunchedEffect
+        nonDaily = withContext(Dispatchers.IO) { loop.read(LocalDate.now()) }
+            ?.filterNot { it.daily }?.mapTo(mutableSetOf()) { it.uuid }
+            .orEmpty()
+    }
 
     Scaffold(
         topBar = {
@@ -296,7 +404,23 @@ fun BlockDetailScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { confirmDelete = true }) {
+                    IconButton(onClick = onEdit) {
+                        Icon(Icons.Filled.Edit, contentDescription = "Edit block")
+                    }
+                    IconButton(onClick = {
+                        if (guarded) {
+                            loosen = LoosenRequest(
+                                title = "Delete this block?",
+                                detail = "${block.name} stops blocking for good.",
+                                hardcore = hardcore,
+                            ) {
+                                store.edit { it.deleteBlock(block.id) }
+                                onBack()
+                            }
+                        } else {
+                            confirmDelete = true
+                        }
+                    }) {
                         Icon(Icons.Filled.DeleteOutline, contentDescription = "Delete block")
                     }
                 },
@@ -337,13 +461,17 @@ fun BlockDetailScreen(
                 when {
                     block.state == BlockState.EARNED -> {
                         Gap(16)
-                        Button(
-                            onClick = { store.dispatch(BlockEvent.Redeem(block.id)) },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null)
-                            WGap(8)
-                            Text("Open ${appLabel.take(18)} for ${block.reward.unlockDurationMs / 60_000} min")
+                        if (store.engine.redeemRejection(world, block.id, store.clock) == RejectReason.CAP_REACHED) {
+                            CapReachedNote(block, world, store)
+                        } else {
+                            Button(
+                                onClick = { store.dispatch(BlockEvent.Redeem(block.id)) },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null)
+                                WGap(8)
+                                Text("Open ${appLabel.take(18)} for ${block.reward.unlockDurationMs / 60_000} min")
+                            }
                         }
                         TextButton(
                             onClick = { store.dispatch(BlockEvent.UserResetEarned(block.id)) },
@@ -373,11 +501,31 @@ fun BlockDetailScreen(
                     val editable = block.state == BlockState.ARMED
                     Gap(4)
                     world.items(block.id).sortedBy { it.order }.forEach { item ->
+                        val removeItem = {
+                            loosening("Remove \"${item.text}\"?", "The checklist gets easier to finish.") {
+                                store.edit { it.removeChecklistItem(item.id) }
+                            }
+                        }
                         if (item.externalHabitId != null) {
                             LoopLinkedRow(
                                 name = item.text,
                                 done = item.done,
-                                onRemove = if (editable) ({ store.edit { it.removeChecklistItem(item.id) } }) else null,
+                                yesterday = item.linkedDay == LinkedDay.YESTERDAY,
+                                onYesterdayChange = if (editable) ({ yesterday ->
+                                    loosening("Change which day counts?", "A different day's tick will unlock this block.") {
+                                        val day = if (yesterday) LinkedDay.YESTERDAY else LinkedDay.TODAY
+                                        store.edit { w -> w.updateItem(item.id) { it.copy(linkedDay = day) } }
+                                        loop.sync() // re-tick it against the other day
+                                    }
+                                }) else null,
+                                goal = item.countsGoal.takeIf { it || item.externalHabitId in nonDaily },
+                                onGoalChange = if (editable) ({ goal ->
+                                    loosening("Change what counts?", "Days covered by the habit's goal would count too.") {
+                                        store.edit { w -> w.updateItem(item.id) { it.copy(countsGoal = goal) } }
+                                        loop.sync()
+                                    }
+                                }) else null,
+                                onRemove = if (editable) removeItem else null,
                             )
                         } else {
                             ChecklistEditRow(
@@ -385,7 +533,7 @@ fun BlockDetailScreen(
                                 editable = editable,
                                 onToggle = { done -> store.dispatch(BlockEvent.ToggleChecklistItem(item.id, done)) },
                                 onRename = { text -> store.edit { it.renameChecklistItem(item.id, text) } },
-                                onRemove = { store.edit { it.removeChecklistItem(item.id) } },
+                                onRemove = removeItem,
                             )
                         }
                     }
@@ -422,12 +570,18 @@ fun BlockDetailScreen(
                     Gap(8)
                     SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                         SegmentedButton(
-                            selected = block.enforcementTier == EnforcementTier.SOFT,
-                            onClick = { store.edit { it.setEnforcementTier(block.id, EnforcementTier.SOFT) } },
+                            selected = !hardcore,
+                            onClick = {
+                                if (hardcore) {
+                                    loosening("Make this block soft?", "Settings and uninstalling won't be guarded for it any more.") {
+                                        store.edit { it.setEnforcementTier(block.id, EnforcementTier.SOFT) }
+                                    }
+                                }
+                            },
                             shape = SegmentedButtonDefaults.itemShape(0, 2),
                         ) { Text("Soft") }
                         SegmentedButton(
-                            selected = block.enforcementTier == EnforcementTier.HARDCORE,
+                            selected = hardcore,
                             onClick = { store.edit { it.setEnforcementTier(block.id, EnforcementTier.HARDCORE) } },
                             enabled = guard.hasPassword(), // needs a password set in Settings first
                             shape = SegmentedButtonDefaults.itemShape(1, 2),
@@ -454,6 +608,8 @@ fun BlockDetailScreen(
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
         )
     }
+
+    loosen?.let { request -> LoosenGuardDialog(request, guard, onDismiss = { loosen = null }) }
 
     if (pickingLoopHabit) {
         LoopHabitPickerDialog(
@@ -529,17 +685,56 @@ private fun ChecklistEditRow(
 // =====================================================================================
 
 @Composable
-fun SettingsScreen(world: World, store: WorldStore, guard: HardcoreGuard, websites: WebsiteMonitor, loop: LoopHabits) {
+fun SettingsScreen(
+    world: World,
+    store: WorldStore,
+    guard: HardcoreGuard,
+    websites: WebsiteMonitor,
+    loop: LoopHabits,
+    clockGuard: ClockGuard,
+    shared: SharedSync,
+) {
     val context = LocalContext.current
     val resumeSignal = rememberResumeSignal()
     val granted = remember(resumeSignal) { AppPermission.entries.associateWith { it.isGranted(context) } }
     val websiteTracking = remember(resumeSignal) { websites.tracking(context) }
     val loopStatus = remember(resumeSignal) { loop.status() }
+    val loopSync by loop.lastSync.collectAsStateWithLifecycle()
     val anyLoopLinks = world.checklist.values.any { items -> items.any { it.externalHabitId != null } }
     val readyCount = granted.values.count { it }
     val deviceAdminActive = remember(resumeSignal) { guard.isDeviceAdminActive() }
+    val automaticTime = remember(resumeSignal) { clockGuard.automaticTime() }
+    val clockSkew = remember(resumeSignal) { clockGuard.check(); clockGuard.skewMs }
     var hasPassword by remember { mutableStateOf(guard.hasPassword()) }
-    var newPassword by remember { mutableStateOf("") }
+    var loosen by remember { mutableStateOf<LoosenRequest?>(null) }
+    var backupMessage by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val text = BlocksBackups.export(store.world.value)
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                runCatching { context.contentResolver.openOutputStream(uri)?.use { it.write(text.encodeToByteArray()) } }.isSuccess
+            }
+            backupMessage = if (ok) "Exported ${store.world.value.blocks.size} blocks." else "Couldn't write that file."
+        }
+    }
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val text = withContext(Dispatchers.IO) {
+                runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes().decodeToString() } }.getOrNull()
+            }
+            val parsed = text?.let { runCatching { BlocksBackups.import(store.world.value, it) }.getOrNull() }
+            backupMessage = if (parsed == null) {
+                "That file isn't an xrnhabit backup."
+            } else {
+                store.edit { w -> BlocksBackups.import(w, text).first }
+                if (parsed.second == 0) "Nothing new: every block in it is already here." else "Added ${parsed.second} blocks."
+            }
+        }
+    }
 
     Scaffold(topBar = { HFTopAppBar(title = { Text("Settings") }) }) { pad ->
         Column(
@@ -567,6 +762,17 @@ fun SettingsScreen(world: World, store: WorldStore, guard: HardcoreGuard, websit
                 }
                 if (OemAutostart.isKnownOem()) {
                     PermRow("Autostart (${Build.MANUFACTURER})", granted = null) { OemAutostart.open(context) }
+                }
+                PermRow("Automatic date & time", granted = automaticTime) {
+                    runCatching { context.startActivity(Intent(android.provider.Settings.ACTION_DATE_SETTINGS)) }
+                }
+                if (clockSkew != 0L) {
+                    Text(
+                        "The phone's clock was set ${formatDuration(kotlin.math.abs(clockSkew))} " +
+                            "${if (clockSkew > 0) "ahead" else "back"} by hand. Blocks keep using the real time.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
 
@@ -598,12 +804,66 @@ fun SettingsScreen(world: World, store: WorldStore, guard: HardcoreGuard, websit
                     ) {
                         loop.launchIntent()?.let { runCatching { context.startActivity(it) } }
                     }
+                    loopSync?.let { sync ->
+                        rememberTicker(30_000)
+                        Text(
+                            if (sync.ok) {
+                                "Last read ${formatAgo(sync.atWallMs)}"
+                            } else {
+                                "Couldn't reach xrnloops ${formatAgo(sync.atWallMs)}. Open it once, then come back."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (sync.ok) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
+                        )
+                    }
                 }
             }
 
+            SyncCard(shared)
+
             HFCard {
-                Text("Behavior", style = MaterialTheme.typography.titleMedium)
-                KeyValueRow("Daily unlock cap", "${world.settings.dailyCapMs / 60_000} min")
+                Text("Daily unlock limit", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "The most time all unlocks together can give you in a day.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Gap(8)
+                val cap = world.settings.dailyCapMs
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    DAILY_CAP_CHOICES_MIN.forEach { minutes ->
+                        val ms = minutes * 60_000
+                        FilterChip(
+                            selected = cap == ms,
+                            onClick = {
+                                val apply = { store.edit { w -> w.copy(settings = w.settings.copy(dailyCapMs = ms)) } }
+                                if (ms > cap && world.blocks.any { BlockEdits.guardNeeded(store.engine, world, it, store.clock) }) {
+                                    loosen = LoosenRequest(
+                                        title = "Raise the limit to ${formatDuration(ms)}?",
+                                        detail = "Unlocks could give you more time each day.",
+                                        hardcore = guard.hasPassword() && world.blocks.any { it.enforcementTier == EnforcementTier.HARDCORE },
+                                        apply = { apply() },
+                                    )
+                                } else {
+                                    apply()
+                                }
+                            },
+                            label = { Text(formatDuration(ms)) },
+                        )
+                    }
+                }
+                val tooLong = world.blocks.filter { it.mode == BlockMode.HABIT && it.reward.unlockDurationMs > cap }
+                if (tooLong.isNotEmpty()) {
+                    Gap(8)
+                    Text(
+                        "Can't open at this limit (their unlock is longer): ${tooLong.joinToString { it.name }}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
             }
 
             if (guard.isSupported()) {
@@ -611,41 +871,197 @@ fun SettingsScreen(world: World, store: WorldStore, guard: HardcoreGuard, websit
                     Text("Hardcore mode", style = MaterialTheme.typography.titleMedium)
                     Gap(8)
                     when {
-                        !hasPassword -> {
-                            OutlinedTextField(
-                                value = newPassword,
-                                onValueChange = { newPassword = it },
-                                label = { Text("New password") },
-                                singleLine = true,
-                                visualTransformation = PasswordVisualTransformation(),
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                            Gap(8)
-                            Button(
-                                enabled = newPassword.isNotBlank(),
-                                onClick = {
-                                    guard.setPassword(newPassword)
-                                    hasPassword = true
-                                    newPassword = ""
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                            ) { Text("Set password") }
-                        }
-
+                        !hasPassword -> PasswordForm(
+                            askCurrent = false,
+                            submitLabel = "Set password",
+                            onSubmit = { _, new ->
+                                guard.setPassword(new)
+                                hasPassword = true
+                                null
+                            },
+                        )
                         !deviceAdminActive -> {
                             Button(
                                 onClick = { (context as? Activity)?.let(guard::requestDeviceAdmin) },
                                 modifier = Modifier.fillMaxWidth(),
                             ) { Text("Turn on anti-uninstall") }
                         }
-
                         else -> KeyValueRow("Anti-uninstall", "On")
                     }
+                    if (hasPassword) {
+                        var changing by remember { mutableStateOf(false) }
+                        if (changing) {
+                            Gap(8)
+                            PasswordForm(
+                                askCurrent = true,
+                                submitLabel = "Change password",
+                                onSubmit = { current, new ->
+                                    if (guard.changePassword(current, new)) {
+                                        changing = false
+                                        null
+                                    } else {
+                                        "The current password is wrong."
+                                    }
+                                },
+                            )
+                        } else {
+                            TextButton(onClick = { changing = true }) { Text("Change password") }
+                        }
+                    }
+                }
+            }
+
+            HFCard {
+                Text("Backup", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Save your blocks to a file, or add blocks from one. Importing only adds blocks; it never changes or removes the ones here.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Gap(8)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = { exportLauncher.launch("xrnhabit-blocks-${LocalDate.now()}.json") },
+                        enabled = world.blocks.isNotEmpty(),
+                    ) { Text("Export") }
+                    OutlinedButton(onClick = { importLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) }) {
+                        Text("Import")
+                    }
+                }
+                backupMessage?.let {
+                    Gap(4)
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
     }
+
+    loosen?.let { request -> LoosenGuardDialog(request, guard, onDismiss = { loosen = null }) }
+}
+
+private val DAILY_CAP_CHOICES_MIN = listOf(15L, 30L, 60L, 90L, 120L, 180L)
+
+/**
+ * A new password typed twice, so a typo can't lock Settings for good; plus the current one when
+ * changing it. [onSubmit] returns an error to show, or null when done.
+ */
+@Composable
+private fun PasswordForm(askCurrent: Boolean, submitLabel: String, onSubmit: (current: String, new: String) -> String?) {
+    var current by remember { mutableStateOf("") }
+    var new by remember { mutableStateOf("") }
+    var repeat by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    val mismatch = repeat.isNotEmpty() && new != repeat
+    @Composable
+    fun field(value: String, label: String, isError: Boolean = false, onChange: (String) -> Unit) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = { onChange(it); error = null },
+            label = { Text(label) },
+            singleLine = true,
+            isError = isError,
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+    if (askCurrent) field(current, "Current password") { current = it }
+    field(new, "New password") { new = it }
+    field(repeat, "New password again", isError = mismatch) { repeat = it }
+    if (mismatch) Text("The two don't match.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+    error?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error) }
+    Gap(8)
+    Button(
+        enabled = new.isNotBlank() && new == repeat && (!askCurrent || current.isNotEmpty()),
+        onClick = { error = onSubmit(current, new) },
+        modifier = Modifier.fillMaxWidth(),
+    ) { Text(submitLabel) }
+}
+
+/** The home-server link that shares unlocks, breaks and blocks with the laptop (contract §2.4). */
+@Composable
+private fun SyncCard(shared: SharedSync) {
+    val settings = shared.settings
+    val status by shared.status.collectAsStateWithLifecycle()
+    var editing by remember { mutableStateOf(!settings.isConfigured) }
+    var url by remember { mutableStateOf(settings.url) }
+    var user by remember { mutableStateOf(settings.user.ifEmpty { "sonn" }) }
+    var password by remember { mutableStateOf(settings.password) }
+    var busy by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    HFCard {
+        Text("Sync with laptop", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Shares blocks, unlocks, breaks and lockdowns with xrnhabit on your laptop through your home server.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Gap(8)
+        if (editing) {
+            OutlinedTextField(
+                value = url,
+                onValueChange = { url = it },
+                label = { Text("Server address") },
+                placeholder = { Text("https://your-server/xrnhabit") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = user,
+                onValueChange = { user = it },
+                label = { Text("User") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = password,
+                onValueChange = { password = it },
+                label = { Text("Password") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Gap(8)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    enabled = url.trim().startsWith("http") && user.isNotBlank() && password.isNotEmpty() && !busy,
+                    onClick = {
+                        settings.save(url, user, password)
+                        editing = false
+                        busy = true
+                        scope.launch { shared.syncNow(); busy = false }
+                    },
+                ) { Text("Save and sync") }
+                if (settings.isConfigured) TextButton(onClick = { editing = false }) { Text("Cancel") }
+            }
+        } else {
+            rememberTicker(30_000)
+            Text(
+                when {
+                    busy -> "Syncing…"
+                    status == null -> "Connected to ${settings.url}"
+                    status!!.ok -> "Synced ${formatAgo(status!!.atWallMs)} · ${settings.url}"
+                    else -> "${status!!.message} (${formatAgo(status!!.atWallMs)})"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = if (status?.ok == false && !busy) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Gap(8)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(enabled = !busy, onClick = { busy = true; scope.launch { shared.syncNow(); busy = false } }) { Text("Sync now") }
+                TextButton(onClick = { editing = true }) { Text("Change") }
+            }
+        }
+    }
+}
+
+/** "just now", "5 min ago", "2 h ago". */
+private fun formatAgo(wallMs: Long): String {
+    val ago = System.currentTimeMillis() - wallMs
+    return if (ago < 60_000) "just now" else "${formatDuration(ago)} ago"
 }
 
 @Composable
@@ -683,30 +1099,57 @@ private enum class HowItBlocks(val label: String) {
     TIME("Set time"),
 }
 
+/**
+ * Creates a block, or edits [existing]. An edit keeps the block's kind and how it unlocks (the
+ * checklist is edited on the block's own page); a change that loosens it goes through the guard
+ * (contract §2.3).
+ */
 @Composable
-fun CreateBlockScreen(store: WorldStore, websites: WebsiteMonitor, loop: LoopHabits, onDone: () -> Unit) {
+fun CreateBlockScreen(
+    store: WorldStore,
+    websites: WebsiteMonitor,
+    loop: LoopHabits,
+    guard: HardcoreGuard,
+    onDone: () -> Unit,
+    existing: Block? = null,
+) {
     val context = LocalContext.current
+    val editing = existing != null
+    val hadTimer = existing?.trigger?.type.let { it == TriggerType.TIMER || it == TriggerType.COMBINED }
     val apps = remember { InstalledApps.launchable(context) }
-    var selectedTargets by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var sites by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var name by remember { mutableStateOf("") }
-    var how by remember { mutableStateOf(HowItBlocks.HABIT) }
-    var useChecklist by remember { mutableStateOf(true) }
-    var useTimer by remember { mutableStateOf(false) }
-    var combineMode by remember { mutableStateOf(CombineMode.AND) }
-    var timerMinutes by remember { mutableStateOf("30") }
-    var unlockMinutes by remember { mutableStateOf("5") }
+    var selectedTargets by remember { mutableStateOf(existing?.targetPackages ?: emptySet()) }
+    var sites by remember { mutableStateOf(existing?.targetSites ?: emptySet()) }
+    var name by remember { mutableStateOf(existing?.name ?: "") }
+    var how by remember {
+        mutableStateOf(
+            when (existing?.mode) {
+                null, BlockMode.HABIT -> HowItBlocks.HABIT
+                BlockMode.ALLOWANCE -> HowItBlocks.LIMIT
+                BlockMode.SCHEDULE, BlockMode.LOCKDOWN -> HowItBlocks.TIME
+            },
+        )
+    }
+    var useChecklist by remember { mutableStateOf(existing?.trigger?.type.let { it == null || it == TriggerType.CHECKLIST || it == TriggerType.COMBINED }) }
+    var useTimer by remember { mutableStateOf(hadTimer) }
+    var combineMode by remember { mutableStateOf(existing?.trigger?.combineMode ?: CombineMode.AND) }
+    var timerMinutes by remember { mutableStateOf(if (hadTimer) (existing!!.trigger.requiredAmount / 60_000).toString() else "30") }
+    var unlockMinutes by remember { mutableStateOf(((existing?.reward?.unlockDurationMs ?: Defaults.DEFAULT_UNLOCK_MS) / 60_000).toString()) }
     var checklistItems by remember { mutableStateOf(listOf("")) }
     var linkedHabits by remember { mutableStateOf(listOf<LoopHabit>()) }
+    var yesterdayLinks by remember { mutableStateOf(setOf<String>()) } // uuids counting yesterday's tick
+    var goalLinks by remember { mutableStateOf(setOf<String>()) } // uuids counting goal-met days
     var pickingLoopHabit by remember { mutableStateOf(false) }
-    var useDifferentHabitApp by remember { mutableStateOf(false) }
-    var habitApps by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var allowanceMinutes by remember { mutableStateOf("30") }
-    var onSchedule by remember { mutableStateOf(false) }
-    var lockdownMinutes by remember { mutableStateOf("60") }
-    var scheduleDays by remember { mutableStateOf((1..5).toSet()) }
-    var startMinute by remember { mutableIntStateOf(9 * 60) }
-    var endMinute by remember { mutableIntStateOf(17 * 60) }
+    var useDifferentHabitApp by remember { mutableStateOf(existing?.trigger?.habitPackages?.isNotEmpty() == true) }
+    var habitApps by remember { mutableStateOf(existing?.trigger?.habitPackages ?: emptySet()) }
+    var allowanceMinutes by remember { mutableStateOf(existing?.takeIf { it.mode == BlockMode.ALLOWANCE }?.let { (it.dailyAllowanceMs / 60_000).toString() } ?: "30") }
+    var onSchedule by remember { mutableStateOf(existing?.mode == BlockMode.SCHEDULE) }
+    var lockdownMinutes by remember { mutableStateOf(existing?.takeIf { it.mode == BlockMode.LOCKDOWN }?.let { (it.lockdownMs / 60_000).toString() } ?: "60") }
+    val existingWindow = existing?.takeIf { it.mode == BlockMode.SCHEDULE }?.schedule
+    var scheduleDays by remember { mutableStateOf(existingWindow?.activeDays ?: (1..5).toSet()) }
+    var startMinute by remember { mutableIntStateOf(existingWindow?.activeWindow?.startMinuteOfDay ?: (9 * 60)) }
+    var endMinute by remember { mutableIntStateOf(existingWindow?.activeWindow?.endMinuteOfDay ?: (17 * 60)) }
+    var loosen by remember { mutableStateOf<LoosenRequest?>(null) }
+    val capMinutes = store.world.collectAsStateWithLifecycle().value.settings.dailyCapMs / 60_000
 
     val habitMode = how == HowItBlocks.HABIT
     val validItems = checklistItems.map { it.trim() }.filter { it.isNotEmpty() }
@@ -716,6 +1159,7 @@ fun CreateBlockScreen(store: WorldStore, websites: WebsiteMonitor, loop: LoopHab
     val allowanceValid = (allowanceMinutes.toLongOrNull() ?: 0) > 0
     val lockdownValid = (lockdownMinutes.toLongOrNull() ?: 0) > 0
     val scheduleValid = scheduleDays.isNotEmpty() && startMinute != endMinute
+    val unlockMin = unlockMinutes.toLongOrNull() ?: 0
     val hint = when {
         !hasTargets -> if (websites.isSupported()) "Pick an app or add a website to block" else "Pick at least one app to lock"
         name.isBlank() -> "Give the block a name"
@@ -725,9 +1169,11 @@ fun CreateBlockScreen(store: WorldStore, websites: WebsiteMonitor, loop: LoopHab
         how == HowItBlocks.TIME && !onSchedule && !lockdownValid -> "Set how long to block"
         !habitMode -> null
         !useChecklist && !useTimer -> "Pick at least one way to unlock it"
-        useChecklist && !checklistValid -> "Add at least one task"
+        useChecklist && !editing && !checklistValid -> "Add at least one task"
         useTimer && !timerValid -> "Set the timer minutes"
         useTimer && useDifferentHabitApp && habitApps.isEmpty() -> "Pick which app counts the timer"
+        unlockMin <= 0 -> "Set how many minutes an unlock lasts"
+        unlockMin > capMinutes -> "An unlock can't be longer than your daily unlock limit ($capMinutes min, in Settings)"
         else -> null
     }
     val canCreate = hint == null
@@ -735,7 +1181,7 @@ fun CreateBlockScreen(store: WorldStore, websites: WebsiteMonitor, loop: LoopHab
     Scaffold(
         topBar = {
             HFTopAppBar(
-                title = { Text("New block") },
+                title = { Text(if (editing) "Edit block" else "New block") },
                 navigationIcon = {
                     IconButton(onClick = onDone) { Icon(Icons.Filled.Close, contentDescription = "Cancel") }
                 },
@@ -771,6 +1217,38 @@ fun CreateBlockScreen(store: WorldStore, websites: WebsiteMonitor, loop: LoopHab
                             HowItBlocks.LIMIT -> BlockMode.ALLOWANCE
                             HowItBlocks.TIME -> if (onSchedule) BlockMode.SCHEDULE else BlockMode.LOCKDOWN
                         }
+                        if (existing != null) {
+                            val updated = existing.copy(
+                                name = name.trim(),
+                                targetPackages = selectedTargets,
+                                targetSites = sites,
+                                trigger = if (habitMode && hadTimer) {
+                                    existing.trigger.copy(requiredAmount = timerMs, combineMode = combineMode, habitPackages = habitPkgs)
+                                } else {
+                                    existing.trigger
+                                },
+                                reward = existing.reward.copy(unlockDurationMs = unlockMin * 60_000),
+                                dailyAllowanceMs = if (mode == BlockMode.ALLOWANCE) (allowanceMinutes.toLongOrNull() ?: 0) * 60_000 else existing.dailyAllowanceMs,
+                                lockdownMs = if (mode == BlockMode.LOCKDOWN) (lockdownMinutes.toLongOrNull() ?: 0) * 60_000 else existing.lockdownMs,
+                                schedule = if (mode == BlockMode.SCHEDULE) Schedule(scheduleDays, TimeWindow(startMinute, endMinute)) else existing.schedule,
+                            )
+                            val save = {
+                                store.edit { it.replaceBlock(updated) }
+                                onDone()
+                            }
+                            val world = store.world.value
+                            if (BlockEdits.loosens(existing, updated) && BlockEdits.guardNeeded(store.engine, world, existing, store.clock)) {
+                                loosen = LoosenRequest(
+                                    title = "Save these changes?",
+                                    detail = "They make ${existing.name} easier to get past.",
+                                    hardcore = existing.enforcementTier == EnforcementTier.HARDCORE,
+                                    apply = save,
+                                )
+                            } else {
+                                save()
+                            }
+                            return@Button
+                        }
                         val blockId = UUID.randomUUID().toString()
                         store.edit {
                             it.createBlock(
@@ -782,6 +1260,8 @@ fun CreateBlockScreen(store: WorldStore, websites: WebsiteMonitor, loop: LoopHab
                                 unlockMinutes = unlockMinutes.toLongOrNull() ?: 5,
                                 checklistItems = if (habitMode) validItems else emptyList(),
                                 linkedHabits = if (habitMode && useChecklist) linkedHabits else emptyList(),
+                                yesterdayLinks = yesterdayLinks,
+                                goalLinks = goalLinks,
                                 mode = mode,
                                 dailyAllowanceMs = (allowanceMinutes.toLongOrNull() ?: 0) * 60_000,
                                 lockdownMs = (lockdownMinutes.toLongOrNull() ?: 0) * 60_000,
@@ -795,7 +1275,7 @@ fun CreateBlockScreen(store: WorldStore, websites: WebsiteMonitor, loop: LoopHab
                         if (habitMode && useChecklist && linkedHabits.isNotEmpty()) loop.sync(force = true)
                         onDone()
                     },
-                ) { Text("Create block") }
+                ) { Text(if (editing) "Save" else "Create block") }
             }
         },
     ) { pad ->
@@ -861,6 +1341,7 @@ fun CreateBlockScreen(store: WorldStore, websites: WebsiteMonitor, loop: LoopHab
                         SegmentedButton(
                             selected = how == option,
                             onClick = { how = option },
+                            enabled = !editing || how == option, // an edit keeps the block's kind
                             shape = SegmentedButtonDefaults.itemShape(i, HowItBlocks.entries.size),
                             icon = {}, // three labels need the room the checkmark would take
                         ) { Text(option.label, maxLines = 1) }
@@ -886,11 +1367,13 @@ fun CreateBlockScreen(store: WorldStore, websites: WebsiteMonitor, loop: LoopHab
                             SegmentedButton(
                                 selected = !onSchedule,
                                 onClick = { onSchedule = false },
+                                enabled = !editing || !onSchedule,
                                 shape = SegmentedButtonDefaults.itemShape(0, 2),
                             ) { Text("For a while") }
                             SegmentedButton(
                                 selected = onSchedule,
                                 onClick = { onSchedule = true },
+                                enabled = !editing || onSchedule,
                                 shape = SegmentedButtonDefaults.itemShape(1, 2),
                             ) { Text("On a schedule") }
                         }
@@ -911,7 +1394,7 @@ fun CreateBlockScreen(store: WorldStore, websites: WebsiteMonitor, loop: LoopHab
                 }
             }
 
-            if (habitMode) HFCard {
+            if (habitMode && !editing) HFCard {
                 Text("How you unlock it", style = MaterialTheme.typography.titleMedium)
                 Gap(10)
                 Row(
@@ -948,7 +1431,7 @@ fun CreateBlockScreen(store: WorldStore, websites: WebsiteMonitor, loop: LoopHab
                 }
             }
 
-            if (habitMode && useChecklist) {
+            if (habitMode && useChecklist && !editing) {
                 HFCard {
                     Text("Checklist", style = MaterialTheme.typography.titleMedium)
                     Gap(8)
@@ -969,7 +1452,19 @@ fun CreateBlockScreen(store: WorldStore, websites: WebsiteMonitor, loop: LoopHab
                         }
                     }
                     linkedHabits.forEach { habit ->
-                        LoopLinkedRow(name = habit.name, done = null, onRemove = { linkedHabits = linkedHabits - habit })
+                        LoopLinkedRow(
+                            name = habit.name,
+                            done = null,
+                            yesterday = habit.uuid in yesterdayLinks,
+                            onYesterdayChange = { yesterdayLinks = yesterdayLinks.toggled(habit.uuid) },
+                            goal = if (habit.daily) null else habit.uuid in goalLinks,
+                            onGoalChange = { goalLinks = goalLinks.toggled(habit.uuid) },
+                            onRemove = {
+                                linkedHabits = linkedHabits - habit
+                                yesterdayLinks = yesterdayLinks - habit.uuid
+                                goalLinks = goalLinks - habit.uuid
+                            },
+                        )
                     }
                     Row {
                         TextButton(onClick = { checklistItems = checklistItems + "" }) {
@@ -1033,8 +1528,9 @@ fun CreateBlockScreen(store: WorldStore, websites: WebsiteMonitor, loop: LoopHab
                 Gap(8)
                 OutlinedTextField(
                     value = unlockMinutes,
-                    onValueChange = { v -> unlockMinutes = v.filter(Char::isDigit) },
+                    onValueChange = { v -> unlockMinutes = v.filter(Char::isDigit).take(4) },
                     label = { Text("Unlock minutes") },
+                    supportingText = { Text("Up to $capMinutes min, your daily unlock limit") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.fillMaxWidth(),
@@ -1054,6 +1550,8 @@ fun CreateBlockScreen(store: WorldStore, websites: WebsiteMonitor, loop: LoopHab
             },
         )
     }
+
+    loosen?.let { request -> LoosenGuardDialog(request, guard, onDismiss = { loosen = null }) }
 }
 
 private fun Set<String>.toggled(value: String): Set<String> = if (value in this) this - value else this + value
@@ -1257,6 +1755,8 @@ private fun World.createBlock(
     unlockMinutes: Long,
     checklistItems: List<String>,
     linkedHabits: List<LoopHabit>,
+    yesterdayLinks: Set<String>,
+    goalLinks: Set<String>,
     mode: BlockMode,
     dailyAllowanceMs: Long,
     lockdownMs: Long,
@@ -1278,12 +1778,19 @@ private fun World.createBlock(
     val plain = checklistItems.mapIndexed { i, text ->
         ChecklistItem(id = "$id-i$i", blockId = id, text = text, order = i)
     }
-    val items = plain + linkedHabits.mapIndexed { i, habit -> linkedItem(id, habit, order = plain.size + i) }
+    val items = plain + linkedHabits.mapIndexed { i, habit ->
+        val day = if (habit.uuid in yesterdayLinks) LinkedDay.YESTERDAY else LinkedDay.TODAY
+        linkedItem(id, habit, order = plain.size + i, day = day).copy(countsGoal = habit.uuid in goalLinks)
+    }
     return copy(
         blocks = blocks + block,
         checklist = if (items.isEmpty()) checklist else checklist + (id to items),
     )
 }
+
+/** Saves an edited block's settings; its state moves on through events only, so the current one is kept. */
+private fun World.replaceBlock(block: Block): World =
+    copy(blocks = blocks.map { if (it.id == block.id) block.copy(state = it.state) else it })
 
 private fun World.setEnforcementTier(blockId: String, tier: EnforcementTier): World =
     copy(blocks = blocks.map { if (it.id == blockId) it.copy(enforcementTier = tier) else it })
@@ -1300,18 +1807,26 @@ private fun World.addChecklistItem(blockId: String): World {
 }
 
 /** A checklist item only Loop can tick (contract I23); the habit's name is its text. */
-private fun linkedItem(blockId: String, habit: LoopHabit, order: Int) = ChecklistItem(
+private fun linkedItem(blockId: String, habit: LoopHabit, order: Int, day: LinkedDay = LinkedDay.TODAY) = ChecklistItem(
     id = "$blockId-${UUID.randomUUID()}",
     blockId = blockId,
     text = habit.name,
     order = order,
     externalHabitId = habit.uuid,
+    linkedDay = day,
 )
 
 private fun World.addLinkedItem(blockId: String, habit: LoopHabit): World {
     val existing = items(blockId)
     if (existing.any { it.externalHabitId == habit.uuid }) return this
     return copy(checklist = checklist + (blockId to existing + linkedItem(blockId, habit, order = existing.size)))
+}
+
+/** Changes one checklist item, wherever it lives (e.g. which day a linked item counts, I23). */
+private fun World.updateItem(itemId: String, transform: (ChecklistItem) -> ChecklistItem): World {
+    val entry = checklist.entries.firstOrNull { (_, items) -> items.any { it.id == itemId } } ?: return this
+    val updated = entry.value.map { if (it.id == itemId) transform(it) else it }
+    return copy(checklist = checklist + (entry.key to updated))
 }
 
 private fun World.renameChecklistItem(itemId: String, text: String): World {

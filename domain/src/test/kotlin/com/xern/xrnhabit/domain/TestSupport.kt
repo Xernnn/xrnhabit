@@ -69,7 +69,7 @@ class RecordingShield(private val log: MutableList<String>) : ShieldPort {
 object NoopTelemetry : Telemetry {
     override fun onBlockedImpression(pkg: String, atWallMs: Long) = Unit
     override fun onHabitCompleted(blockId: String, atWallMs: Long) = Unit
-    override fun onUnlockConsumed(blockId: String, ms: Long, atWallMs: Long) = Unit
+    override fun onUnlockConsumed(blockId: String, ms: Long, atWallMs: Long, startedAtWall: Long) = Unit
 }
 
 // ---- builders -------------------------------------------------------------------------
@@ -154,8 +154,15 @@ fun items(blockId: String, count: Int, done: Int = 0): List<ChecklistItem> =
     }
 
 /** A checklist item ticked only by the external habit tracker (I23). Id is `"$blockId-$habitId"`. */
-fun linkedItem(blockId: String, habitId: String, order: Int = 0) =
-    ChecklistItem(id = "$blockId-$habitId", blockId = blockId, text = habitId, order = order, externalHabitId = habitId)
+fun linkedItem(blockId: String, habitId: String, order: Int = 0, day: LinkedDay = LinkedDay.TODAY) =
+    ChecklistItem(
+        id = "$blockId-$habitId",
+        blockId = blockId,
+        text = habitId,
+        order = order,
+        externalHabitId = habitId,
+        linkedDay = day,
+    )
 
 fun buildWorld(
     blocks: List<Block>,
@@ -182,3 +189,42 @@ fun buildWorld(
     // As if the shield had already been told about this starting world.
     return world.copy(appliedShield = BlockEngine().shieldPlan(world, clock))
 }
+
+// ---- several devices (contract §2.4) ---------------------------------------------------
+
+/** The sync server: it only stores the last state pushed. */
+class FakeServer(var state: SharedState = SharedState())
+
+/**
+ * One device in a multi-device test: its own world and clock, and the shared state it last
+ * agreed on with the server. Give each device a different monotonic start: only wall time is
+ * shared between them.
+ */
+class Device(
+    val id: String,
+    var world: World,
+    val clock: FakeClock,
+) {
+    private val engine = BlockEngine()
+    var base: SharedState? = null
+        private set
+
+    init {
+        world = world.copy(deviceId = id)
+    }
+
+    fun on(event: BlockEvent): Outcome = engine.reduce(world, event, clock).also { world = it.world }
+
+    /** One round: merge with what the server has, adopt it, push the result. */
+    fun sync(server: FakeServer) {
+        on(BlockEvent.SharedStateMerged(base, server.state))
+        val pushed = SharedState.of(world)
+        server.state = pushed
+        base = pushed
+    }
+
+    fun block(id: String): Block = world.block(id)!!
+}
+
+/** Moves every device's clocks forward together. */
+fun advanceAll(ms: Long, vararg devices: Device) = devices.forEach { it.clock.advance(ms) }

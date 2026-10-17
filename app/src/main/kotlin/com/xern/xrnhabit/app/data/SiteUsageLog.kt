@@ -1,5 +1,6 @@
 package com.xern.xrnhabit.app.data
 
+import androidx.core.util.AtomicFile
 import com.xern.xrnhabit.domain.Clock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -8,7 +9,6 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
 import java.time.Instant
-import java.time.LocalDate
 
 /**
  * Time spent on each website, per local day. Android keeps no per-site history we can read,
@@ -64,22 +64,23 @@ class SiteUsageLog(private val file: File, private val clock: Clock) {
             day.merge(host, sliceEnd - cursor, Long::plus)
             cursor = sliceEnd
         }
-        val oldest = LocalDate.now(clock.zone()).toEpochDay() - KEEP_DAYS
+        val oldest = Instant.ofEpochMilli(end).atZone(clock.zone()).toLocalDate().toEpochDay() - KEEP_DAYS
         val pruned = days.filterKeys { it > oldest }
         _days.value = pruned
         save(pruned)
     }
 
     private fun load(): Map<Long, Map<String, Long>> = runCatching {
-        json.decodeFromString(Stored.serializer(), file.readText()).days
+        json.decodeFromString(Stored.serializer(), AtomicFile(file).readFully().decodeToString()).days
     }.getOrDefault(emptyMap())
 
     private fun save(days: Map<Long, Map<String, Long>>) {
+        val atomic = AtomicFile(file)
+        val out = runCatching { atomic.startWrite() }.getOrNull() ?: return
         runCatching {
-            val tmp = File(file.parentFile, file.name + ".tmp")
-            tmp.writeText(json.encodeToString(Stored.serializer(), Stored(days)))
-            tmp.renameTo(file)
-        }
+            out.write(json.encodeToString(Stored.serializer(), Stored(days)).encodeToByteArray())
+            atomic.finishWrite(out)
+        }.onFailure { atomic.failWrite(out) }
     }
 
     private companion object {

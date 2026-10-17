@@ -8,6 +8,8 @@
     <!-- Phase A: the block screen is drawn as an overlay (brainstorm §4.3) -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Only for the opt-in sync with your own home server (Settings → Sync with laptop). -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -42,15 +44,6 @@
             </intent-filter>
         </activity>
 
-        <!-- Full-screen fallback for the block screen when the overlay path is unavailable. -->
-        <activity
-            android:name=".block.BlockScreenActivity"
-            android:exported="false"
-            android:excludeFromRecents="true"
-            android:launchMode="singleInstance"
-            android:screenOrientation="portrait"
-            android:theme="@style/Theme.Xrnhabit" />
-
         <service
             android:name=".block.BlockerForegroundService"
             android:exported="false"
@@ -69,6 +62,18 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <!-- Quick Settings: start the lockdown blocks without opening the app. -->
+        <service
+            android:name=".block.LockdownTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile_lock"
+            android:label="Lock down"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
 
         <!-- Loop pushes this after every habit change; only our Loop build can send it. -->
         <receiver

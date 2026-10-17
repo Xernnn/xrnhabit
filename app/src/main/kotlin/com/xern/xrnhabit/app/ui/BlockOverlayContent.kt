@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.HourglassBottom
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material3.Button
@@ -50,6 +51,9 @@ import com.xern.xrnhabit.app.ui.theme.XrnhabitTheme
 import com.xern.xrnhabit.domain.Block
 import com.xern.xrnhabit.domain.BlockMode
 import com.xern.xrnhabit.domain.BlockState
+import com.xern.xrnhabit.domain.CombineMode
+import com.xern.xrnhabit.domain.LinkedDay
+import com.xern.xrnhabit.domain.RejectReason
 import com.xern.xrnhabit.domain.TriggerType
 import kotlinx.coroutines.delay
 
@@ -66,11 +70,11 @@ private const val SETTLE_MS = 5_000L
 fun BlockOverlayContent(
     ui: OverlayShieldPort.OverlayUi?,
     onToggleItem: (String, Boolean) -> Unit,
-    onStartTimer: (String) -> Unit,
+    onSetTimer: (String, Boolean) -> Unit,
     onRedeem: (String) -> Unit,
     onLeave: () -> Unit,
-    /** Opens our Loop build; null when it isn't installed. */
-    onOpenLoop: (() -> Unit)? = null,
+    /** Opens a habit (by uuid) in our Loop build; null when it isn't installed. */
+    onOpenLoop: ((String) -> Unit)? = null,
 ) {
     XrnhabitTheme {
         val block = ui?.block
@@ -138,6 +142,7 @@ fun BlockOverlayContent(
                 state == BlockState.EARNED -> EarnedActions(
                     blockId = block.id,
                     unlockMin = block.reward.unlockDurationMs / 60_000,
+                    ui = ui,
                     onRedeem = onRedeem,
                 )
 
@@ -145,25 +150,19 @@ fun BlockOverlayContent(
                     ChecklistItemsSection(ui, style.content, onToggleItem, onOpenLoop)
                 }
 
-                block.trigger.type == TriggerType.TIMER -> {
-                    Button(onClick = { onStartTimer(block.id) }, modifier = Modifier.fillMaxWidth()) {
-                        Icon(Icons.Filled.PlayArrow, contentDescription = null)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Start timer")
-                    }
-                }
+                block.trigger.type == TriggerType.TIMER -> TimerSection(block, ui, style.content, onSetTimer)
 
                 block.trigger.type == TriggerType.COMBINED -> {
                     ChecklistItemsSection(ui, style.content, onToggleItem, onOpenLoop)
-                    Spacer(Modifier.height(20.dp))
-                    Button(onClick = { onStartTimer(block.id) }, modifier = Modifier.fillMaxWidth()) {
-                        Icon(Icons.Filled.PlayArrow, contentDescription = null)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Start timer")
-                    }
+                    Spacer(Modifier.height(24.dp))
+                    Text(
+                        if (block.trigger.combineMode == CombineMode.AND) "And the timer" else "Or the timer",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    TimerSection(block, ui, style.content, onSetTimer)
                 }
-
-                else -> Unit
             }
 
             Spacer(Modifier.height(if (strict) 8.dp else 32.dp))
@@ -181,7 +180,7 @@ private fun strictStatus(block: Block, ui: OverlayShieldPort.OverlayUi): String 
     return when (block.mode) {
         BlockMode.ALLOWANCE -> "${formatDuration(ui.allowanceMs ?: block.dailyAllowanceMs)} used · opens at midnight"
         BlockMode.SCHEDULE -> if (freeAt != null) "Until ${formatClockTime(freeAt)}" else ""
-        BlockMode.LOCKDOWN -> if (freeAt != null) "${formatRemaining(freeAt - System.currentTimeMillis())} left" else ""
+        BlockMode.LOCKDOWN -> ui.freeInMs?.let { "${formatRemaining(it)} left" }.orEmpty()
         BlockMode.HABIT -> ""
     }
 }
@@ -191,11 +190,18 @@ private fun ChecklistItemsSection(
     ui: OverlayShieldPort.OverlayUi,
     accentContent: androidx.compose.ui.graphics.Color,
     onToggleItem: (String, Boolean) -> Unit,
-    onOpenLoop: (() -> Unit)?,
+    onOpenLoop: ((String) -> Unit)?,
 ) {
     ui.items.sortedBy { it.order }.forEach { item ->
-        if (item.externalHabitId != null) {
-            LoopItemRow(text = item.text, done = item.done, accentContent = accentContent, onOpenLoop = onOpenLoop)
+        val habitId = item.externalHabitId
+        if (habitId != null) {
+            LoopItemRow(
+                text = item.text,
+                done = item.done,
+                yesterday = item.linkedDay == LinkedDay.YESTERDAY,
+                accentContent = accentContent,
+                onOpenLoop = onOpenLoop?.let { open -> { open(habitId) } },
+            )
         } else {
             HoldToCheck(
                 text = item.text,
@@ -216,8 +222,59 @@ private fun ChecklistItemsSection(
     MeterBar(if (ui.items.isEmpty()) 0f else done.toFloat() / ui.items.size, color = accentContent)
 }
 
+/**
+ * Time counted toward a TIMER habit, and the switch for it. Says where the time counts: in the
+ * habit app(s) when the block names any, otherwise right here while this screen is up.
+ */
 @Composable
-private fun EarnedActions(blockId: String, unlockMin: Long, onRedeem: (String) -> Unit) {
+private fun TimerSection(
+    block: Block,
+    ui: OverlayShieldPort.OverlayUi,
+    accentContent: androidx.compose.ui.graphics.Color,
+    onSetTimer: (String, Boolean) -> Unit,
+) {
+    val required = block.trigger.requiredAmount
+    Text(
+        "${formatDuration(ui.timerMs.coerceAtMost(required))} of ${formatDuration(required)}",
+        style = MaterialTheme.typography.titleMedium,
+    )
+    Spacer(Modifier.height(6.dp))
+    MeterBar(if (required <= 0) 1f else (ui.timerMs.toFloat() / required).coerceIn(0f, 1f), color = accentContent)
+    Spacer(Modifier.height(8.dp))
+    Text(
+        when {
+            ui.habitAppLabel != null -> "Counts while you use ${ui.habitAppLabel}"
+            else -> "Counts while you wait on this screen"
+        },
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Spacer(Modifier.height(16.dp))
+    if (ui.timerRunning) {
+        OutlinedButton(onClick = { onSetTimer(block.id, false) }, modifier = Modifier.fillMaxWidth()) {
+            Icon(Icons.Filled.Pause, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("Pause timer")
+        }
+    } else {
+        Button(onClick = { onSetTimer(block.id, true) }, modifier = Modifier.fillMaxWidth()) {
+            Icon(Icons.Filled.PlayArrow, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("Start timer")
+        }
+    }
+}
+
+@Composable
+private fun EarnedActions(blockId: String, unlockMin: Long, ui: OverlayShieldPort.OverlayUi, onRedeem: (String) -> Unit) {
+    if (ui.redeemRejection == RejectReason.CAP_REACHED) {
+        Text(
+            capReachedText(ui.unlockUsedTodayMs, ui.dailyCapMs, unlockMin * 60_000),
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        return
+    }
     var shownAt by remember(blockId) { mutableLongStateOf(System.currentTimeMillis()) }
     var now by remember(blockId) { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(blockId) {
@@ -240,12 +297,13 @@ private fun EarnedActions(blockId: String, unlockMin: Long, onRedeem: (String) -
 
 /**
  * A checklist row linked to a Loop habit (I23). It can't be checked here — only a tick in Loop
- * counts — so tapping it opens Loop instead.
+ * counts — so tapping it opens Loop instead. [yesterday]: the item counts yesterday's tick.
  */
 @Composable
 private fun LoopItemRow(
     text: String,
     done: Boolean,
+    yesterday: Boolean,
     accentContent: androidx.compose.ui.graphics.Color,
     onOpenLoop: (() -> Unit)?,
 ) {
@@ -280,7 +338,10 @@ private fun LoopItemRow(
             )
             Text(
                 when {
+                    done && yesterday -> "Done in xrnloops yesterday"
                     done -> "Done in xrnloops"
+                    yesterday && onOpenLoop != null -> "Needs yesterday's tick in xrnloops · tap to open"
+                    yesterday -> "Needs yesterday's tick in xrnloops"
                     onOpenLoop != null -> "Tick it in xrnloops · tap to open"
                     else -> "Tick it in xrnloops"
                 },

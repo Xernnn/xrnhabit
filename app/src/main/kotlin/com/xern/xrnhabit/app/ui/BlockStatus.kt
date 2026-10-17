@@ -131,6 +131,16 @@ fun freeAtWall(block: Block, world: World, engine: BlockEngine, clock: Clock): L
     }
 }
 
+/** Why an earned unlock can't be opened: it would go past today's unlock limit (I9). */
+fun capReachedText(usedMs: Long, capMs: Long, unlockMs: Long): String {
+    val left = capMs - usedMs
+    return if (left < 60_000) {
+        "Today's unlock time is used up (${formatDuration(capMs)} a day). It resets at midnight."
+    } else {
+        "Only ${formatDuration(left)} of today's unlock time is left, and this unlock is ${formatDuration(unlockMs)}. It resets at midnight."
+    }
+}
+
 /** "Weekdays · 09:00–17:00", "Every day · All day", "Mon, Wed · 22:00–06:00". */
 fun describeSchedule(schedule: Schedule): String {
     val days = schedule.activeDays

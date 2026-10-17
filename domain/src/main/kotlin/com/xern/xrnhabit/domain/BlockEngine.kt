@@ -7,8 +7,8 @@ import java.time.Instant
  * the current [World], one [BlockEvent] and a [Clock], and returns an [Outcome]. It performs
  * no I/O and never mutates its inputs.
  *
- * Every invariant I1..I24 in the contract has a matching test in
- * `domain/src/test/.../InvariantTests.kt` (`i01_*` .. `i24_*`).
+ * Every invariant I1..I25 in the contract has a matching test in
+ * `domain/src/test/.../InvariantTests.kt` (`i01_*` .. `i25_*`).
  */
 class BlockEngine {
 
@@ -25,10 +25,14 @@ class BlockEngine {
             is BlockEvent.TimerControl -> onTimerControl(world, event, clock)
             is BlockEvent.StartLockdown -> world.withLockdownStarted(event.blockId, clock) // I21
             is BlockEvent.ExternalHabitsSynced -> onExternalHabitsSynced(world, event, clock, effects)
+            is BlockEvent.StartPause -> onStartPause(world, event, clock)
+            is BlockEvent.EndPause -> world.copy(pause = null)
+            is BlockEvent.SharedStateMerged ->
+                adoptShared(world, SharedState.merge(event.base, SharedState.of(world), event.remote), clock) // I26
         }
 
         // Housekeeping sweep after every event: day rollover, credit expiry (I1), tamper (I3),
-        // unlock time-up + 30s warning (G3), lockdown end (I21). Keeping this out of the
+        // unlock time-up + 30s warning (G3), lockdown end (I21), break end (I25). Keeping this out of the
         // per-event handlers means a plain Tick and a Redeem both re-evaluate expiry the same way.
         w = sweep(w, clock, effects)
 
@@ -42,10 +46,11 @@ class BlockEngine {
     fun shieldPlan(world: World, clock: Clock): ShieldPlan =
         ShieldPlan(blockedPackages(world, clock), blockedSites(world, clock))
 
+    /** Blocked apps: phone packages and laptop apps alike (I29). */
     fun blockedPackages(world: World, clock: Clock): Set<String> {
-        val allTargets = world.blocks.flatMapTo(mutableSetOf()) { it.targetPackages }
+        val allTargets = world.blocks.flatMapTo(mutableSetOf()) { it.targetApps }
         return allTargets.filterTo(mutableSetOf()) { pkg ->
-            targetBlocked(world, world.blocks.filter { pkg in it.targetPackages }, clock)
+            targetBlocked(world, world.blocks.filter { pkg in it.targetApps }, clock)
         }
     }
 
@@ -59,9 +64,11 @@ class BlockEngine {
 
     /**
      * I22: any engaged ALLOWANCE / SCHEDULE / LOCKDOWN block wins outright; otherwise the HABIT
-     * rule (I6) — free iff *any* covering HABIT block is UNLOCKED.
+     * rule (I6) — free iff *any* covering HABIT block is UNLOCKED. During a break (I25) the
+     * blocks it covers drop out first.
      */
-    private fun targetBlocked(world: World, covering: List<Block>, clock: Clock): Boolean {
+    private fun targetBlocked(world: World, all: List<Block>, clock: Clock): Boolean {
+        val covering = if (pauseRemainingMs(world, clock) > 0) all.filterNot(::pausable) else all
         if (covering.any { it.mode != BlockMode.HABIT && isBlocking(world, it, clock) }) return true
         val habit = covering.filter { it.mode == BlockMode.HABIT }
         if (habit.any { it.state == BlockState.UNLOCKED }) return false
@@ -69,7 +76,7 @@ class BlockEngine {
     }
 
     fun isAppUnlocked(world: World, pkg: String): Boolean =
-        world.blocks.any { pkg in it.targetPackages && it.state == BlockState.UNLOCKED }
+        world.blocks.any { pkg in it.targetApps && it.state == BlockState.UNLOCKED }
 
     /** I5: the shield is on for a block in every state except UNLOCKED. */
     fun shieldOn(world: World, blockId: String, clock: Clock): Boolean {
@@ -80,6 +87,7 @@ class BlockEngine {
     /** Whether this one block, on its own, is blocking its targets right now (contract §2.2). */
     fun isBlocking(world: World, block: Block, clock: Clock): Boolean {
         if (!block.enabled) return false
+        if (pausable(block) && pauseRemainingMs(world, clock) > 0) return false // I25
         return when (block.mode) {
             BlockMode.HABIT -> block.state != BlockState.UNLOCKED && scheduleActive(block, clock)
             BlockMode.ALLOWANCE ->
@@ -89,10 +97,16 @@ class BlockEngine {
         }
     }
 
-    /** I19: today's used allowance; a progress window from an earlier day counts as zero. */
+    /**
+     * I19: today's used allowance, here plus on the other devices (§2.4); a progress window or
+     * a report from an earlier day counts as zero.
+     */
     fun allowanceUsedMs(world: World, block: Block, clock: Clock): Long {
-        val p = world.progress[block.id] ?: return 0
-        return if (dayRolled(p, clock)) 0 else p.accumulatedMs
+        val p = world.progress[block.id]
+        val here = if (p == null || dayRolled(p, clock)) 0 else p.accumulatedMs
+        val today = clock.startOfLocalDayMs()
+        val elsewhere = world.otherAllowance[block.id].orEmpty().values.sumOf { if (it.dayStartWall == today) it.ms else 0 }
+        return here + elsewhere
     }
 
     /** I21: monotonic countdown, so moving the wall clock can't shorten it. */
@@ -101,9 +115,36 @@ class BlockEngine {
         return (l.durationMs - (clock.nowMonotonicMs() - l.startedAtMonotonic)).coerceAtLeast(0)
     }
 
+    /** I25: what's left of the running break, on the monotonic clock like a lockdown. */
+    fun pauseRemainingMs(world: World, clock: Clock): Long {
+        val p = world.pause ?: return 0
+        return (p.durationMs - (clock.nowMonotonicMs() - p.startedAtMonotonic)).coerceAtLeast(0)
+    }
+
+    /** I25: a break may be started when none is running and none was taken today. */
+    fun canPause(world: World, clock: Clock): Boolean =
+        pauseRemainingMs(world, clock) == 0L && world.lastPauseEpochDay != clock.epochDay()
+
+    /** I25: a break lifts SOFT blocks only, and never a lockdown the user started on purpose. */
+    fun pausable(block: Block): Boolean =
+        block.enforcementTier == EnforcementTier.SOFT && block.mode != BlockMode.LOCKDOWN
+
+    /** I9/I28: unlock time spent today; counters from an earlier day count as zero. */
+    fun unlockUsedTodayMs(world: World, clock: Clock): Long =
+        if (clock.epochDay() != world.dailyUsageEpochDay) 0 else world.dailyUnlockUsedMs + world.unlockLog.values.sum()
+
+    /** Why [BlockEvent.Redeem] would be refused right now, or null if it would go through (I9). */
+    fun redeemRejection(world: World, blockId: String, clock: Clock): RejectReason? {
+        val block = world.block(blockId)
+        val credit = world.credits[blockId]
+        if (block?.state != BlockState.EARNED || credit == null) return RejectReason.NOT_EARNED
+        if (unlockUsedTodayMs(world, clock) + credit.amountMs > world.settings.dailyCapMs) return RejectReason.CAP_REACHED
+        return null
+    }
+
     /** I18: in a target app, or on a target site (or a subdomain of one). */
     private fun inTargets(block: Block, pkg: String?, site: String?): Boolean =
-        (pkg != null && pkg in block.targetPackages) ||
+        (pkg != null && pkg in block.targetApps) || // I29: a laptop app is a target like a package
             (site != null && block.targetSites.any { Sites.matches(site, it) })
 
     // ---- trigger evaluation ----------------------------------------------------------
@@ -113,7 +154,6 @@ class BlockEngine {
         val p = world.progress[block.id]
         return when (block.trigger.type) {
             TriggerType.TIMER -> timerMet(p, block)
-            TriggerType.COUNT -> (p?.count ?: 0) >= block.trigger.requiredAmount
             TriggerType.CHECKLIST -> checklistThresholdMet(world, block)
             TriggerType.COMBINED -> {
                 val timer = timerMet(p, block)
@@ -257,9 +297,10 @@ class BlockEngine {
     }
 
     /**
-     * I23: linked items mirror the external tracker — ticked iff that habit is done today and
-     * its tick hasn't already paid for a credit today (I24). Only ARMED HABIT blocks listen, as
-     * with a manual toggle (I12). A snapshot for any other day raced midnight and is dropped.
+     * I23: linked items mirror the external tracker — ticked iff that habit is done on the item's
+     * [LinkedDay] and no tick has already paid for an unlock today (I24). Only ARMED HABIT blocks
+     * listen, as with a manual toggle (I12). A snapshot for any other day raced midnight and is
+     * dropped.
      */
     private fun onExternalHabitsSynced(
         world: World,
@@ -276,7 +317,11 @@ class BlockEngine {
             if (items.none { it.externalHabitId != null }) continue
             val updated = items.map { item ->
                 val habitId = item.externalHabitId ?: return@map item
-                val done = habitId in event.doneHabitIds && item.spentEpochDay != today
+                val ticked = when (item.linkedDay) {
+                    LinkedDay.TODAY -> if (item.countsGoal) event.goalMetHabitIds else event.doneHabitIds
+                    LinkedDay.YESTERDAY -> if (item.countsGoal) event.goalMetYesterdayHabitIds else event.doneYesterdayHabitIds
+                }
+                val done = habitId in ticked && item.spentEpochDay != today
                 when {
                     done == item.done -> item
                     done -> item.copy(done = true, doneAtMonotonic = clock.nowMonotonicMs())
@@ -300,31 +345,45 @@ class BlockEngine {
         clock: Clock,
         effects: MutableList<Effect>,
     ): World {
-        val block = world.block(blockId) ?: return world
-        val credit = world.credits[blockId]
-        if (block.state != BlockState.EARNED || credit == null) {
-            effects += Effect.RedeemRejected(blockId, RejectReason.NOT_EARNED)
+        world.block(blockId) ?: return world
+        redeemRejection(world, blockId, clock)?.let { reason -> // I9
+            effects += Effect.RedeemRejected(blockId, reason)
             return world
         }
+        val credit = world.credits.getValue(blockId)
         val epochDay = clock.epochDay()
-        val dailyUsed = if (epochDay != world.dailyUsageEpochDay) 0L else world.dailyUnlockUsedMs
-        if (dailyUsed + credit.amountMs > world.settings.dailyCapMs) { // I9
-            effects += Effect.RedeemRejected(blockId, RejectReason.CAP_REACHED)
-            return world
-        }
+        val sameDay = world.dailyUsageEpochDay == epochDay
         val session = UnlockSession(
             blockId = blockId,
             startedAtMonotonic = clock.nowMonotonicMs(),
             startedAtWall = clock.nowWallMs(),
             durationMs = credit.amountMs,
         )
+        // I24: each external tick that is done now pays for this unlock. Stamped here rather than
+        // on earn, so a credit that expires unused (I1) doesn't use the tick up.
+        val items = world.items(blockId)
+        val checklist = if (items.none { it.externalHabitId != null && it.done }) {
+            world.checklist
+        } else {
+            world.checklist + (blockId to items.map { item ->
+                if (item.externalHabitId != null && item.done) item.copy(spentEpochDay = epochDay) else item
+            })
+        }
         return world.copy(
             blocks = world.blocks.replace(blockId) { it.copy(state = BlockState.UNLOCKED) },
             credits = world.credits - blockId,
             sessions = world.sessions + (blockId to session),
-            dailyUnlockUsedMs = dailyUsed,
+            checklist = checklist,
+            dailyUnlockUsedMs = if (sameDay) world.dailyUnlockUsedMs else 0,
+            unlockLog = if (sameDay) world.unlockLog else emptyMap(),
             dailyUsageEpochDay = epochDay,
         )
+    }
+
+    private fun onStartPause(world: World, event: BlockEvent.StartPause, clock: Clock): World {
+        if (!canPause(world, clock) || event.durationMs <= 0) return world // I25: one a day
+        val pause = Pause(clock.nowMonotonicMs(), clock.nowWallMs(), event.durationMs)
+        return world.copy(pause = pause, lastPauseEpochDay = clock.epochDay())
     }
 
     private fun onUserReset(world: World, blockId: String, clock: Clock): World {
@@ -363,20 +422,9 @@ class BlockEngine {
             amountMs = block.reward.unlockDurationMs,
         )
         effects += Effect.HabitCompleted(block.id)
-        // I24: each external tick that is done now has paid for this credit.
-        val items = world.items(block.id)
-        val checklist = if (items.none { it.externalHabitId != null && it.done }) {
-            world.checklist
-        } else {
-            val today = clock.epochDay()
-            world.checklist + (block.id to items.map { item ->
-                if (item.externalHabitId != null && item.done) item.copy(spentEpochDay = today) else item
-            })
-        }
         return world.copy(
             blocks = world.blocks.replace(block.id) { it.copy(state = BlockState.EARNED) },
             credits = world.credits + (block.id to credit),
-            checklist = checklist,
         )
     }
 
@@ -396,7 +444,7 @@ class BlockEngine {
         var w = world
         val today = clock.epochDay()
         if (today != w.dailyUsageEpochDay) {
-            w = w.copy(dailyUnlockUsedMs = 0, dailyUsageEpochDay = today)
+            w = w.copy(dailyUnlockUsedMs = 0, unlockLog = emptyMap(), dailyUsageEpochDay = today)
         }
 
         // I21: drop lockdowns that have run out (or whose block is gone / no longer LOCKDOWN).
@@ -404,6 +452,7 @@ class BlockEngine {
             w.block(id)?.mode == BlockMode.LOCKDOWN && lockdownRemainingMs(w, id, clock) > 0
         }
         if (liveLockdowns.size != w.lockdowns.size) w = w.copy(lockdowns = liveLockdowns)
+        if (w.pause != null && pauseRemainingMs(w, clock) == 0L) w = w.copy(pause = null) // I25
 
         for (block in w.blocks) {
             w = when (block.state) {
@@ -437,13 +486,11 @@ class BlockEngine {
                         val timeUp = monoElapsed >= s.durationMs
                         if (tamper || timeUp) {
                             val consumed = monoElapsed.coerceIn(0, s.durationMs)
-                            effects += Effect.UnlockConsumed(block.id, consumed)
+                            effects += Effect.UnlockConsumed(block.id, consumed, s.startedAtWall)
                             if (tamper) effects += Effect.TamperDetected(block.id)
                             val reset = returnToArmed(w, block, clock)
-                            reset.copy(
-                                dailyUnlockUsedMs = reset.dailyUnlockUsedMs + consumed,
-                                dailyUsageEpochDay = today,
-                            )
+                            // I28: keyed by session, so another device ending the same one counts it once.
+                            reset.copy(unlockLog = reset.unlockLog + (s.key to consumed), dailyUsageEpochDay = today)
                         } else {
                             val remaining = s.durationMs - monoElapsed
                             if (remaining in 1..w.settings.unlockWarningMs) {
@@ -456,6 +503,91 @@ class BlockEngine {
             }
         }
         return w
+    }
+
+    // ---- shared state (§2.4) -------------------------------------------------------
+
+    /**
+     * I27: takes [shared] (already merged, I26) into this device's world. Entities this device
+     * already has keep their monotonic stamps; new ones are anchored from wall time, as
+     * [rebuild] does (I8). Block states follow from sessions and credits; leaving EARNED or
+     * UNLOCKED this way resets like I10, and entering UNLOCKED spends local linked ticks (I24).
+     */
+    private fun adoptShared(world: World, shared: SharedState, clock: Clock): World {
+        val nowMono = clock.nowMonotonicMs()
+        val nowWall = clock.nowWallMs()
+        fun anchor(wall: Long) = nowMono - (nowWall - wall).coerceAtLeast(0)
+        val blockIds = shared.blocks.keys
+
+        val sessions = shared.sessions.filterKeys { it in blockIds }.mapValues { (id, s) ->
+            world.sessions[id]?.takeIf { it.copy(startedAtMonotonic = 0) == s } ?: s.copy(startedAtMonotonic = anchor(s.startedAtWall))
+        }
+        // An open block holds no credit: redeeming spent it (§2.1).
+        val credits = shared.credits.filterKeys { it in blockIds && it !in sessions }.mapValues { (id, c) ->
+            world.credits[id]?.takeIf { it.copy(earnedAtMonotonic = 0) == c } ?: c.copy(earnedAtMonotonic = anchor(c.earnedAtWall))
+        }
+        val lockdowns = shared.lockdowns.filterKeys { it in blockIds }.mapValues { (id, l) ->
+            world.lockdowns[id]?.takeIf { it.copy(startedAtMonotonic = 0) == l } ?: l.copy(startedAtMonotonic = anchor(l.startedAtWall))
+        }
+        val pause = shared.pause?.let { p ->
+            world.pause?.takeIf { it.copy(startedAtMonotonic = 0) == p } ?: p.copy(startedAtMonotonic = anchor(p.startedAtWall))
+        }
+
+        val mine = world.checklist.values.flatten().associateBy { it.id }
+        val checklist = shared.items.values
+            .filter { it.blockId in blockIds }
+            .groupBy { it.blockId }
+            .mapValues { (_, items) ->
+                items.sortedBy { it.order }.map { item ->
+                    val local = mine[item.id]
+                    when {
+                        // A linked item's tick comes from this device's own tracker read (§2.4).
+                        item.externalHabitId != null -> item.copy(done = local?.done == true, doneAtMonotonic = local?.doneAtMonotonic)
+                        local != null && local.done == item.done -> item.copy(doneAtMonotonic = local.doneAtMonotonic)
+                        else -> item.copy(doneAtMonotonic = if (item.done) nowMono else null)
+                    }
+                }
+            }
+            .toMutableMap()
+
+        val today = clock.epochDay()
+        val progress = world.progress.filterKeys { it in blockIds }.toMutableMap()
+        val blocks = shared.blocks.values.map { b ->
+            val state = when {
+                b.mode != BlockMode.HABIT -> BlockState.ARMED
+                b.id in sessions -> BlockState.UNLOCKED
+                b.id in credits -> BlockState.EARNED
+                else -> BlockState.ARMED
+            }
+            val before = world.block(b.id)?.state ?: BlockState.ARMED
+            val items = checklist[b.id].orEmpty()
+            if (before != BlockState.ARMED && state == BlockState.ARMED) { // I10, as returnToArmed
+                progress[b.id] = freshProgress(b.id, clock)
+                checklist[b.id] = resetItems(items)
+            } else if (before != BlockState.UNLOCKED && state == BlockState.UNLOCKED) { // I24, as onRedeem
+                checklist[b.id] = items.map { if (it.externalHabitId != null && it.done) it.copy(spentEpochDay = today) else it }
+            }
+            b.copy(state = state)
+        }
+
+        val newerDay = shared.unlockEpochDay > world.dailyUsageEpochDay
+        return world.copy(
+            blocks = blocks,
+            progress = progress,
+            credits = credits,
+            sessions = sessions,
+            checklist = checklist.filterValues { it.isNotEmpty() },
+            lockdowns = lockdowns,
+            pause = pause,
+            lastPauseEpochDay = shared.lastPauseEpochDay,
+            settings = shared.settings,
+            dailyUnlockUsedMs = if (newerDay) 0 else world.dailyUnlockUsedMs,
+            dailyUsageEpochDay = maxOf(shared.unlockEpochDay, world.dailyUsageEpochDay),
+            unlockLog = if (shared.unlockEpochDay >= world.dailyUsageEpochDay) shared.unlockLog else world.unlockLog,
+            otherAllowance = shared.allowance
+                .mapValues { (_, byDevice) -> byDevice - world.deviceId }
+                .filterValues { it.isNotEmpty() },
+        )
     }
 
     // ---- rebuild (I8) ---------------------------------------------------------------
@@ -477,10 +609,14 @@ class BlockEngine {
             val wallElapsed = (nowWall - l.startedAtWall).coerceAtLeast(0)
             l.copy(startedAtMonotonic = nowMono - wallElapsed)
         }
+        val pause = world.pause?.let { p ->
+            val wallElapsed = (nowWall - p.startedAtWall).coerceAtLeast(0)
+            p.copy(startedAtMonotonic = nowMono - wallElapsed)
+        }
         // Timer accrual markers are monotonic and meaningless after a reboot; re-anchor them.
         val progress = world.progress.mapValues { (_, p) -> p.copy(lastUpdated = nowMono) }
         return sweep(
-            world.copy(credits = credits, sessions = sessions, lockdowns = lockdowns, progress = progress),
+            world.copy(credits = credits, sessions = sessions, lockdowns = lockdowns, pause = pause, progress = progress),
             clock,
             effects,
         )
@@ -491,7 +627,6 @@ class BlockEngine {
     private fun freshProgress(blockId: String, clock: Clock) = HabitProgress(
         blockId = blockId,
         accumulatedMs = 0,
-        count = 0,
         windowStart = clock.startOfLocalDayMs(),
         lastUpdated = clock.nowMonotonicMs(),
         timerRunning = false,
@@ -506,16 +641,19 @@ class BlockEngine {
         return started != clock.localDate()
     }
 
+    /** I20. A window that wraps midnight belongs to the day it starts on. */
     private fun scheduleActive(block: Block, clock: Clock): Boolean {
         val s = block.schedule
         val zdt = Instant.ofEpochMilli(clock.nowWallMs()).atZone(clock.zone())
-        if (zdt.dayOfWeek.value !in s.activeDays) return false
-        val w = s.activeWindow ?: return true
+        val today = zdt.dayOfWeek
+        val w = s.activeWindow ?: return today.value in s.activeDays
         val minute = zdt.hour * 60 + zdt.minute
-        return if (w.startMinuteOfDay <= w.endMinuteOfDay) {
-            minute in w.startMinuteOfDay until w.endMinuteOfDay
-        } else { // window wraps midnight
-            minute >= w.startMinuteOfDay || minute < w.endMinuteOfDay
+        return when {
+            w.startMinuteOfDay <= w.endMinuteOfDay ->
+                today.value in s.activeDays && minute in w.startMinuteOfDay until w.endMinuteOfDay
+            minute >= w.startMinuteOfDay -> today.value in s.activeDays
+            minute < w.endMinuteOfDay -> today.minus(1).value in s.activeDays // last night's window
+            else -> false
         }
     }
 }

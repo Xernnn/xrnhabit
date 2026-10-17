@@ -1,8 +1,18 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
+}
+
+// Optional: a signing key shared with xrnloops (both apps must carry the same signature), kept
+// outside both repos in ../xrn-signing.properties (storeFile, storePassword, keyAlias, keyPassword;
+// storeFile relative to that file's folder). Without that file, builds are signed with this
+// machine's debug key.
+val xrnSigning: Properties? = rootProject.file("../xrn-signing.properties").takeIf { it.isFile }?.let { f ->
+    Properties().apply { f.inputStream().use { load(it) } }
 }
 
 android {
@@ -29,10 +39,25 @@ android {
         create("play") { dimension = "distribution" }
     }
 
+    signingConfigs {
+        if (xrnSigning != null) {
+            create("xrn") {
+                storeFile = rootProject.file("..").resolve(xrnSigning.getProperty("storeFile"))
+                storePassword = xrnSigning.getProperty("storePassword")
+                keyAlias = xrnSigning.getProperty("keyAlias")
+                keyPassword = xrnSigning.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfigs.findByName("xrn")?.let { signingConfig = it }
+        }
         release {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfigs.findByName("xrn")?.let { signingConfig = it }
         }
     }
 

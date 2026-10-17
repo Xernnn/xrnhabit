@@ -25,3 +25,4 @@ rootProject.name = "xrnhabit"
 include(":app")
 include(":domain")
 include(":hardcore")
+include(":desktop")

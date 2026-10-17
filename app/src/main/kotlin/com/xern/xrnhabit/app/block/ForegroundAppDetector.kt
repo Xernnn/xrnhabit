@@ -31,35 +31,50 @@ interface ForegroundAppDetector {
  * `null` as "nothing is blocked" and dismissed itself. Here `current` only ever moves to
  * another package (the launcher's own RESUMED when you press Home, the next app you open); it is
  * never cleared, so the block never evaporates on its own.
+ *
+ * The cursor and `current` live on the detector, not in one collection of the flow: the service
+ * stops collecting while the screen is off (polling then is pure battery drain) and the next
+ * collection carries on from where the last one stopped, catching up on everything in between.
+ *
+ * It polls every [fastPollMs] while [fast] says a block could need covering at once, and only
+ * every [slowPollMs] otherwise (no block yet: the site-time log is all that listens).
  */
 class UsageStatsDetector(
     context: Context,
-    private val pollIntervalMs: Long = 300L,
+    private val fastPollMs: Long = 300L,
+    private val slowPollMs: Long = 2_000L,
+    private val fast: () -> Boolean = { true },
 ) : ForegroundAppDetector {
 
     private val usm = context.getSystemService(UsageStatsManager::class.java)
 
+    // Seeded from the last minute so the very first poll already knows the current app.
+    private var cursor = System.currentTimeMillis() - 60_000L
+    private var current: String? = null
+
     override val foregroundPackage: Flow<String?> = flow {
-        // Seed from the last minute so the very first tick already knows the current app.
-        var cursor = System.currentTimeMillis() - 60_000L
-        var current: String? = null
         while (true) {
-            val now = System.currentTimeMillis()
-            // Overlap the previous window slightly so an event landing between polls is not lost.
-            val events = usm.queryEvents((cursor - 1_000L).coerceAtLeast(0L), now)
-            val event = UsageEvents.Event()
-            while (events.hasNextEvent()) {
-                events.getNextEvent(event)
-                // Same value: ACTIVITY_RESUMED (API 29) renamed MOVE_TO_FOREGROUND, which minSdk 26 still needs.
-                if (event.eventType == UsageEvents.Event.ACTIVITY_RESUMED ||
-                    event.eventType == @Suppress("DEPRECATION") UsageEvents.Event.MOVE_TO_FOREGROUND
-                ) {
-                    current = event.packageName
-                }
-            }
-            cursor = now
-            emit(current)
-            delay(pollIntervalMs)
+            emit(poll())
+            delay(if (fast()) fastPollMs else slowPollMs)
         }
     }.distinctUntilChanged().flowOn(Dispatchers.Default)
+
+    @Synchronized
+    private fun poll(): String? {
+        val now = System.currentTimeMillis()
+        // Overlap the previous window slightly so an event landing between polls is not lost.
+        val events = usm.queryEvents((cursor - 1_000L).coerceAtLeast(0L), now)
+        val event = UsageEvents.Event()
+        while (events.hasNextEvent()) {
+            events.getNextEvent(event)
+            // Same value: ACTIVITY_RESUMED (API 29) renamed MOVE_TO_FOREGROUND, which minSdk 26 still needs.
+            if (event.eventType == UsageEvents.Event.ACTIVITY_RESUMED ||
+                event.eventType == @Suppress("DEPRECATION") UsageEvents.Event.MOVE_TO_FOREGROUND
+            ) {
+                current = event.packageName
+            }
+        }
+        cursor = now
+        return current
+    }
 }

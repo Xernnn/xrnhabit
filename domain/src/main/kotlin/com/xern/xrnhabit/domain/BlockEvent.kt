@@ -28,10 +28,31 @@ sealed interface BlockEvent {
     data class TimerControl(val blockId: String, val running: Boolean) : BlockEvent
 
     /**
-     * A full snapshot from the external habit tracker: the habits done on local day [epochDay].
-     * Drives linked checklist items (I23, I24). Never sent for a failed read.
+     * A full snapshot from the external habit tracker for local day [epochDay] and the day before
+     * it ([LinkedDay.YESTERDAY] items): the habits ticked that day, and the habits whose goal is
+     * met that day ([ChecklistItem.countsGoal] items). Drives linked checklist items (I23, I24).
+     * Never sent unless both days were read.
      */
-    data class ExternalHabitsSynced(val epochDay: Long, val doneHabitIds: Set<String>) : BlockEvent
+    data class ExternalHabitsSynced(
+        val epochDay: Long,
+        val doneHabitIds: Set<String>,
+        val doneYesterdayHabitIds: Set<String> = emptySet(),
+        val goalMetHabitIds: Set<String> = emptySet(),
+        val goalMetYesterdayHabitIds: Set<String> = emptySet(),
+    ) : BlockEvent
+
+    /** Starts a break from SOFT blocks, at most once per local day (I25). */
+    data class StartPause(val durationMs: Long = Defaults.PAUSE_MS) : BlockEvent
+
+    /** Ends the running break early (I25). */
+    data object EndPause : BlockEvent
+
+    /**
+     * The shared state as the sync server has it ([remote]) and as this device last agreed with
+     * it ([base], null the first time). The engine merges it three ways with this device's own
+     * and adopts the result (contract §2.4, I26, I27).
+     */
+    data class SharedStateMerged(val base: SharedState?, val remote: SharedState) : BlockEvent
 
     /** Process cold start or BOOT_COMPLETED — rebuild state and re-apply the shield (I8). */
     data object BootOrColdStart : BlockEvent

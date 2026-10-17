@@ -188,6 +188,7 @@ class InvariantTests {
 
         assertEquals(BlockState.EARNED, out.world.block("c1")!!.state)
         assertTrue(out.effects.any { it is Effect.RedeemRejected && it.reason == RejectReason.CAP_REACHED })
+        assertEquals("the UI can say why before the tap", RejectReason.CAP_REACHED, engine.redeemRejection(earn(world, clock), "c1", clock))
     }
 
     @Test
@@ -491,6 +492,24 @@ class InvariantTests {
     }
 
     @Test
+    fun i20_overnightWindowBelongsToItsStartDay() {
+        val clock = FakeClock() // Thursday 2026-01-15 12:00 UTC
+        val fridayNight = Schedule(setOf(5), TimeWindow(23 * 60, 7 * 60))
+        val block = modeBlock("n1", BlockMode.SCHEDULE, schedule = fridayNight)
+        val world = buildWorld(listOf(block), clock = clock)
+        fun blocked() = engine.isBlocking(world, block, clock)
+
+        clock.advance(14L * 60 * 60_000) // Fri 02:00: Thursday night, not in the schedule
+        assertFalse(blocked())
+        clock.advance(21L * 60 * 60_000 + 30L * 60_000) // Fri 23:30
+        assertTrue(blocked())
+        clock.advance(2L * 60 * 60_000 + 30L * 60_000) // Sat 02:00: still Friday night
+        assertTrue(blocked())
+        clock.advance(5L * 60 * 60_000) // Sat 07:00: window over
+        assertFalse(blocked())
+    }
+
+    @Test
     fun i21_lockdownIgnoresWallClockAndEnds() {
         val clock = FakeClock()
         val block = modeBlock("l1", BlockMode.LOCKDOWN, lockdownMs = 60L * 60_000)
@@ -608,6 +627,36 @@ class InvariantTests {
     }
 
     @Test
+    fun i23_yesterdayItemCountsYesterdaysTick() {
+        val clock = FakeClock()
+        val item = linkedItem("c1", "journal", day = LinkedDay.YESTERDAY)
+        var world = buildWorld(listOf(checklistBlock("c1")), mapOf("c1" to listOf(item)), clock)
+
+        world = sync(world, clock, "journal") // done today only
+        assertFalse(world.items("c1").single().done)
+        assertEquals(BlockState.ARMED, world.block("c1")!!.state)
+
+        val yesterday = BlockEvent.ExternalHabitsSynced(clock.epochDay(), emptySet(), setOf("journal"))
+        world = engine.reduce(world, yesterday, clock).world
+        assertTrue(world.items("c1").single().done)
+        assertEquals(BlockState.EARNED, world.block("c1")!!.state)
+    }
+
+    @Test
+    fun i23_goalItemCountsGoalMetDays() {
+        val clock = FakeClock()
+        val item = linkedItem("c1", "gym").copy(countsGoal = true)
+        var world = buildWorld(listOf(checklistBlock("c1")), mapOf("c1" to listOf(item)), clock)
+
+        world = sync(world, clock, "gym") // ticked today, but the item asks about the goal
+        assertFalse(world.items("c1").single().done)
+
+        val goalMet = BlockEvent.ExternalHabitsSynced(clock.epochDay(), emptySet(), goalMetHabitIds = setOf("gym"))
+        world = engine.reduce(world, goalMet, clock).world
+        assertEquals(BlockState.EARNED, world.block("c1")!!.state)
+    }
+
+    @Test
     fun i23_syncIgnoredUnlessArmed() {
         val clock = FakeClock()
         val checklist = items("c1", 1) + linkedItem("c1", "meditate", order = 1)
@@ -628,9 +677,10 @@ class InvariantTests {
 
         world = sync(world, clock, "meditate")
         assertEquals(BlockState.EARNED, world.block("c1")!!.state)
-        assertEquals(clock.epochDay(), world.items("c1").single().spentEpochDay)
+        assertNull("not spent until redeemed", world.items("c1").single().spentEpochDay)
 
         world = engine.reduce(world, BlockEvent.Redeem("c1"), clock).world
+        assertEquals(clock.epochDay(), world.items("c1").single().spentEpochDay)
         clock.advance(5L * 60_000) // the unlock runs out
         world = engine.reduce(world, BlockEvent.Tick, clock).world
         assertEquals(BlockState.ARMED, world.block("c1")!!.state)
@@ -641,11 +691,29 @@ class InvariantTests {
     }
 
     @Test
+    fun i24_expiredCreditDoesNotSpendTick() {
+        val clock = FakeClock()
+        var world = buildWorld(listOf(checklistBlock("c1")), mapOf("c1" to listOf(linkedItem("c1", "meditate"))), clock)
+        world = sync(world, clock, "meditate")
+        assertEquals(BlockState.EARNED, world.block("c1")!!.state)
+
+        clock.advance(Defaults.CREDIT_TTL_MS) // never redeemed (I1)
+        world = engine.reduce(world, BlockEvent.Tick, clock).world
+        assertEquals(BlockState.ARMED, world.block("c1")!!.state)
+        assertNull(world.items("c1").single().spentEpochDay)
+
+        world = sync(world, clock, "meditate")
+        assertEquals("the unused tick earns again", BlockState.EARNED, world.block("c1")!!.state)
+    }
+
+    @Test
     fun i24_nextDaySameHabitCanEarnAgain() {
         val clock = FakeClock() // 12:00 UTC
         var world = buildWorld(listOf(checklistBlock("c1")), mapOf("c1" to listOf(linkedItem("c1", "meditate"))), clock)
         world = sync(world, clock, "meditate")
-        world = engine.reduce(world, BlockEvent.UserResetEarned("c1"), clock).world
+        world = engine.reduce(world, BlockEvent.Redeem("c1"), clock).world
+        clock.advance(5L * 60_000) // the unlock runs out
+        world = engine.reduce(world, BlockEvent.Tick, clock).world
         world = sync(world, clock, "meditate")
         assertEquals("spent for today", BlockState.ARMED, world.block("c1")!!.state)
 
@@ -654,5 +722,258 @@ class InvariantTests {
         world = sync(world, clock, "meditate")
 
         assertEquals(BlockState.EARNED, world.block("c1")!!.state)
+    }
+
+    @Test
+    fun i25_pauseLiftsSoftBlocksOnly() {
+        val clock = FakeClock()
+        val soft = checklistBlock("soft", target = "com.soft")
+        val hard = checklistBlock("hard", target = "com.hard").copy(enforcementTier = EnforcementTier.HARDCORE)
+        val lockdown = modeBlock("lock", BlockMode.LOCKDOWN, targetPackages = setOf("com.lock"), lockdownMs = 60L * 60_000)
+        var world = buildWorld(listOf(soft, hard, lockdown), clock = clock)
+        world = engine.reduce(world, BlockEvent.StartLockdown("lock"), clock).world
+
+        val out = engine.reduce(world, BlockEvent.StartPause(), clock)
+
+        assertEquals(setOf("com.hard", "com.lock"), out.shieldPlan!!.blockedPackages)
+        assertFalse(engine.isBlocking(out.world, soft, clock))
+        assertTrue(engine.isBlocking(out.world, hard, clock))
+    }
+
+    @Test
+    fun i25_pauseEndsAndIsOncePerDay() {
+        val clock = FakeClock()
+        var world = buildWorld(listOf(checklistBlock("c1")), clock = clock)
+        world = engine.reduce(world, BlockEvent.StartPause(), clock).world
+        assertTrue(engine.blockedPackages(world, clock).isEmpty())
+
+        clock.advanceWallOnly(-60L * 60_000) // winding the clock back doesn't stretch it
+        clock.advanceMonoOnly(Defaults.PAUSE_MS)
+        world = engine.reduce(world, BlockEvent.Tick, clock).world
+        assertNull(world.pause)
+        assertEquals(setOf("com.target"), engine.blockedPackages(world, clock))
+
+        clock.advanceWallOnly(60L * 60_000)
+        world = engine.reduce(world, BlockEvent.StartPause(), clock).world
+        assertNull("already had today's break", world.pause)
+
+        clock.advance(24L * 60 * 60_000)
+        world = engine.reduce(world, BlockEvent.StartPause(), clock).world
+        assertNotNull(world.pause)
+        world = engine.reduce(world, BlockEvent.EndPause, clock).world
+        assertEquals(setOf("com.target"), engine.blockedPackages(world, clock))
+    }
+
+    @Test
+    fun i25_pauseSurvivesRebootViaWallDelta() {
+        val clock = FakeClock(mono = 50_000_000)
+        var world = buildWorld(listOf(checklistBlock("c1")), clock = clock)
+        world = engine.reduce(world, BlockEvent.StartPause(), clock).world
+
+        clock.advance(5L * 60_000)
+        clock.setMono(1_000)
+        world = engine.reduce(world, BlockEvent.BootOrColdStart, clock).world
+
+        assertEquals(10L * 60_000, engine.pauseRemainingMs(world, clock))
+    }
+
+    // ---- several devices (contract §2.4) -----------------------------------------------
+
+    /** A phone and a laptop on the same wall clock but different monotonic clocks. */
+    private fun twoDevices(blocks: List<Block>, checklist: Map<String, List<ChecklistItem>> = emptyMap()): Triple<Device, Device, FakeServer> {
+        val phoneClock = FakeClock(mono = 7_000_000)
+        val laptopClock = FakeClock(mono = 300_000)
+        val phone = Device("phone", buildWorld(blocks, checklist, phoneClock), phoneClock)
+        val laptop = Device("laptop", World(), laptopClock) // a fresh install: everything comes from the server
+        val server = FakeServer()
+        phone.sync(server)
+        laptop.sync(server)
+        return Triple(phone, laptop, server)
+    }
+
+    @Test
+    fun i19_allowanceCountsOtherDevices() {
+        val block = modeBlock("a1", BlockMode.ALLOWANCE, targetPackages = setOf("com.target"), dailyAllowanceMs = 10L * 60_000)
+            .copy(targetSites = setOf("youtube.com"))
+        val (phone, laptop, server) = twoDevices(listOf(block))
+
+        phone.on(BlockEvent.ForegroundChanged("com.target"))
+        laptop.on(BlockEvent.ForegroundChanged("browser", "youtube.com"))
+        advanceAll(7L * 60_000, phone)
+        phone.on(BlockEvent.Tick)
+        phone.sync(server)
+        laptop.sync(server)
+        assertFalse(engine.isBlocking(laptop.world, laptop.block("a1"), laptop.clock))
+
+        advanceAll(4L * 60_000, laptop) // 7 on the phone + 4 here: over the 10-minute allowance
+        laptop.on(BlockEvent.Tick)
+        assertTrue(engine.isBlocking(laptop.world, laptop.block("a1"), laptop.clock))
+
+        // Yesterday's use elsewhere doesn't count today.
+        advanceAll(24L * 60 * 60_000, phone, laptop)
+        laptop.on(BlockEvent.Tick)
+        assertEquals(0L, engine.allowanceUsedMs(laptop.world, laptop.block("a1"), laptop.clock))
+    }
+
+    @Test
+    fun i26_creditUsedElsewhereIsNotResurrected() {
+        val (phone, laptop, server) = twoDevices(listOf(checklistBlock("c1")), mapOf("c1" to items("c1", 1)))
+        phone.on(BlockEvent.ToggleChecklistItem("c1-i0", true))
+        phone.sync(server)
+        laptop.sync(server)
+        assertEquals(BlockState.EARNED, laptop.block("c1").state)
+
+        laptop.on(BlockEvent.Redeem("c1"))
+        laptop.sync(server)
+        phone.sync(server) // the phone still has the credit, unchanged since it last synced
+
+        assertEquals(BlockState.UNLOCKED, phone.block("c1").state)
+        assertTrue(phone.world.credits.isEmpty())
+        assertEquals(laptop.world.sessions["c1"]!!.startedAtWall, phone.world.sessions["c1"]!!.startedAtWall)
+        assertFalse(engine.blockedPackages(phone.world, phone.clock).contains("com.target"))
+    }
+
+    @Test
+    fun i26_offlineDoubleRedeemKeepsLaterSession() {
+        val (phone, laptop, server) = twoDevices(listOf(checklistBlock("c1")), mapOf("c1" to items("c1", 1)))
+        phone.on(BlockEvent.ToggleChecklistItem("c1-i0", true))
+        phone.sync(server)
+        laptop.sync(server)
+
+        phone.on(BlockEvent.Redeem("c1")) // both redeem while offline, the laptop a minute later
+        advanceAll(60_000, phone, laptop)
+        laptop.on(BlockEvent.Redeem("c1"))
+        phone.sync(server)
+        laptop.sync(server)
+        phone.sync(server)
+
+        val later = laptop.world.sessions["c1"]!!
+        assertEquals("the laptop's, a minute later", laptop.clock.nowWallMs(), later.startedAtWall)
+        assertEquals(later.startedAtWall, phone.world.sessions["c1"]!!.startedAtWall)
+        assertTrue(phone.world.credits.isEmpty() && laptop.world.credits.isEmpty())
+    }
+
+    @Test
+    fun i26_sessionEndedElsewhereEndsHere() {
+        val (phone, laptop, server) = twoDevices(listOf(checklistBlock("c1")), mapOf("c1" to items("c1", 1)))
+        phone.on(BlockEvent.ToggleChecklistItem("c1-i0", true))
+        phone.on(BlockEvent.Redeem("c1"))
+        phone.sync(server)
+        laptop.sync(server)
+        assertEquals(BlockState.UNLOCKED, laptop.block("c1").state)
+
+        phone.clock.advanceWallOnly(-60L * 60_000) // the phone's clock is wound back: tamper (I3)
+        phone.clock.advanceMonoOnly(60_000)
+        phone.on(BlockEvent.Tick)
+        assertEquals(BlockState.ARMED, phone.block("c1").state)
+        phone.sync(server)
+        laptop.sync(server)
+
+        assertEquals(BlockState.ARMED, laptop.block("c1").state)
+        assertTrue(engine.blockedPackages(laptop.world, laptop.clock).contains("com.target"))
+    }
+
+    @Test
+    fun i27_adoptedSessionRunsOutOnTime() {
+        val (phone, laptop, server) = twoDevices(listOf(checklistBlock("c1", unlockMs = 5L * 60_000)), mapOf("c1" to items("c1", 1)))
+        phone.on(BlockEvent.ToggleChecklistItem("c1-i0", true))
+        phone.on(BlockEvent.Redeem("c1"))
+        phone.sync(server)
+
+        advanceAll(2L * 60_000, phone, laptop) // the laptop hears about it two minutes in
+        laptop.sync(server)
+        val tick = laptop.on(BlockEvent.Tick)
+        assertEquals(BlockState.UNLOCKED, laptop.block("c1").state)
+        assertFalse("no false tamper", tick.effects.any { it is Effect.TamperDetected })
+
+        advanceAll(3L * 60_000, phone, laptop)
+        laptop.on(BlockEvent.Tick)
+        assertEquals("ends with the phone's, not five minutes after hearing of it", BlockState.ARMED, laptop.block("c1").state)
+    }
+
+    @Test
+    fun i27_adoptedUnlockSpendsLocalTick() {
+        val (phone, laptop, server) = twoDevices(listOf(checklistBlock("c1")), mapOf("c1" to listOf(linkedItem("c1", "meditate"))))
+        // The phone reads the tick and earns; the laptop's tracker read is behind, so it only
+        // has the credit from the phone when it redeems, and spends no tick of its own.
+        phone.on(BlockEvent.ExternalHabitsSynced(phone.clock.epochDay(), setOf("meditate")))
+        phone.sync(server)
+        laptop.sync(server)
+        laptop.on(BlockEvent.Redeem("c1"))
+        assertNull(laptop.world.items("c1").single().spentEpochDay)
+        laptop.sync(server)
+
+        phone.sync(server) // the phone adopts the unlock: its own tick is now spent (I24)
+        assertEquals(BlockState.UNLOCKED, phone.block("c1").state)
+        assertEquals(phone.clock.epochDay(), phone.world.items("c1").single().spentEpochDay)
+
+        advanceAll(5L * 60_000, phone, laptop)
+        phone.on(BlockEvent.Tick)
+        phone.on(BlockEvent.ExternalHabitsSynced(phone.clock.epochDay(), setOf("meditate")))
+        assertEquals("one tick, one unlock", BlockState.ARMED, phone.block("c1").state)
+        phone.sync(server)
+        laptop.sync(server)
+        assertEquals(phone.clock.epochDay(), laptop.world.items("c1").single().spentEpochDay)
+    }
+
+    @Test
+    fun i27_linkedDoneIsNeverShared() {
+        val (phone, laptop, server) = twoDevices(listOf(checklistBlock("c1")), mapOf("c1" to listOf(linkedItem("c1", "meditate"))))
+        phone.on(BlockEvent.ExternalHabitsSynced(phone.clock.epochDay(), setOf("meditate")))
+        assertTrue(phone.world.items("c1").single().done)
+        phone.sync(server)
+        laptop.sync(server)
+
+        assertEquals(BlockState.EARNED, laptop.block("c1").state) // the credit is shared
+        assertFalse("the tick is the laptop's own to read", laptop.world.items("c1").single().done)
+        assertTrue(phone.world.items("c1").single().done)
+    }
+
+    @Test
+    fun i28_sharedSessionCountsOnceTowardCap() {
+        val (phone, laptop, server) = twoDevices(listOf(checklistBlock("c1", unlockMs = 5L * 60_000)), mapOf("c1" to items("c1", 1)))
+        phone.on(BlockEvent.ToggleChecklistItem("c1-i0", true))
+        phone.on(BlockEvent.Redeem("c1"))
+        phone.sync(server)
+        laptop.sync(server)
+
+        advanceAll(5L * 60_000, phone, laptop) // both see the same session run out
+        val endedOnPhone = phone.on(BlockEvent.Tick).effects.filterIsInstance<Effect.UnlockConsumed>().single()
+        val endedOnLaptop = laptop.on(BlockEvent.Tick).effects.filterIsInstance<Effect.UnlockConsumed>().single()
+        // Each logs it, under the session's one start, so a history across devices counts it once too.
+        assertEquals(endedOnPhone.startedAtWall, endedOnLaptop.startedAtWall)
+        assertTrue(endedOnPhone.startedAtWall > 0)
+        phone.sync(server)
+        laptop.sync(server)
+        phone.sync(server)
+
+        assertEquals(5L * 60_000, engine.unlockUsedTodayMs(phone.world, phone.clock))
+        assertEquals(5L * 60_000, engine.unlockUsedTodayMs(laptop.world, laptop.clock))
+    }
+
+    @Test
+    fun i29_desktopAppTargetsActLikePackages() {
+        val clock = FakeClock()
+        val block = checklistBlock("c1").copy(targetPackages = emptySet(), targetDesktopApps = setOf("steam"))
+        var world = buildWorld(listOf(block), mapOf("c1" to items("c1", 1)), clock)
+
+        assertTrue(engine.blockedPackages(world, clock).contains("steam"))
+        val shown = engine.reduce(world, BlockEvent.ForegroundChanged("steam"), clock)
+        assertTrue(shown.effects.contains(Effect.BlockedImpression("steam")))
+
+        world = engine.reduce(shown.world, BlockEvent.ToggleChecklistItem("c1-i0", true), clock).world
+        world = engine.reduce(world, BlockEvent.Redeem("c1"), clock).world
+        assertTrue(engine.isAppUnlocked(world, "steam"))
+        assertFalse(engine.blockedPackages(world, clock).contains("steam"))
+
+        assertTrue(BlockEdits.loosens(block, block.copy(targetDesktopApps = emptySet())))
+        assertFalse(BlockEdits.loosens(block, block.copy(targetDesktopApps = setOf("steam", "discord"))))
+
+        val allowance = modeBlock("a1", BlockMode.ALLOWANCE, targetPackages = emptySet(), dailyAllowanceMs = 60L * 60_000)
+            .copy(targetDesktopApps = setOf("steam"))
+        var w = buildWorld(listOf(allowance), clock = clock, foregroundPkg = "steam")
+        clock.advance(3L * 60_000)
+        w = engine.reduce(w, BlockEvent.Tick, clock).world
+        assertEquals(3L * 60_000, engine.allowanceUsedMs(w, allowance, clock))
     }
 }

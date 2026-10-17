@@ -54,6 +54,9 @@ import androidx.compose.ui.unit.sp
 import com.xern.xrnhabit.app.data.AppPermission
 import com.xern.xrnhabit.app.data.AppUsage
 import com.xern.xrnhabit.app.data.DayUsage
+import com.xern.xrnhabit.app.data.InstalledApps
+import com.xern.xrnhabit.app.data.LocalTelemetry
+import com.xern.xrnhabit.app.data.TelemetryEvent
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.xern.xrnhabit.app.data.ScreenTime
 import com.xern.xrnhabit.app.data.SiteUsageLog
@@ -68,7 +71,9 @@ import com.xern.xrnhabit.domain.World
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 private const val DAYS = 7
@@ -78,7 +83,7 @@ private val PlotHeight = 132.dp
 private val PlotTopPad = 8.dp
 
 @Composable
-fun InsightsScreen(world: World, websites: WebsiteMonitor, siteUsage: SiteUsageLog) {
+fun InsightsScreen(world: World, websites: WebsiteMonitor, siteUsage: SiteUsageLog, telemetry: LocalTelemetry) {
     val context = LocalContext.current
     val resume = rememberResumeSignal()
     val hasAccess = remember(resume) { AppPermission.USAGE_ACCESS.isGranted(context) }
@@ -90,6 +95,13 @@ fun InsightsScreen(world: World, websites: WebsiteMonitor, siteUsage: SiteUsageL
     LaunchedEffect(hasAccess, resume) {
         while (hasAccess) {
             usage = withContext(Dispatchers.IO) { ScreenTime.lastDays(context, DAYS) }
+            delay(REFRESH_MS)
+        }
+    }
+    var history by remember { mutableStateOf<List<TelemetryEvent>>(emptyList()) }
+    LaunchedEffect(resume) {
+        while (true) {
+            history = withContext(Dispatchers.IO) { telemetry.events() }
             delay(REFRESH_MS)
         }
     }
@@ -135,7 +147,9 @@ fun InsightsScreen(world: World, websites: WebsiteMonitor, siteUsage: SiteUsageL
             }
 
             SectionLabel("xrnhabit")
-            val usedMin = world.dailyUnlockUsedMs / 60_000
+            val historyDate = days?.takeIf { it.isNotEmpty() }?.let { it[selected.coerceIn(it.indices)].date } ?: LocalDate.now()
+            HistoryCard(historyDate, history)
+            val usedMin = (world.dailyUnlockUsedMs + world.unlockLog.values.sum()) / 60_000 // I28
             val capMin = world.settings.dailyCapMs / 60_000
             HFCard {
                 Text(
@@ -467,6 +481,75 @@ private fun BlockedTag() {
 
 private val ShortDay = DateTimeFormatter.ofPattern("EEE")
 private val LongDay = DateTimeFormatter.ofPattern("EEEE, d MMM")
+
+/**
+ * What xrnhabit itself saw on [date] (the day picked on the chart): habits done, attempts to open
+ * a blocked app and which apps, unlock time used. Plus the run of days with a habit done.
+ */
+@Composable
+private fun HistoryCard(date: LocalDate, events: List<TelemetryEvent>) {
+    val context = LocalContext.current
+    val zone = ZoneId.systemDefault()
+    fun TelemetryEvent.date(): LocalDate = Instant.ofEpochMilli(atWallMs).atZone(zone).toLocalDate()
+    val onDay = events.filter { it.date() == date }
+    val habits = onDay.count { it is TelemetryEvent.HabitDone }
+    val blocked = onDay.filterIsInstance<TelemetryEvent.Blocked>()
+    val unlockMs = onDay.filterIsInstance<TelemetryEvent.UnlockUsed>().sumOf { it.ms }
+    val habitDays = events.filterIsInstance<TelemetryEvent.HabitDone>().mapTo(HashSet()) { it.date() }
+    val today = LocalDate.now(zone)
+    // A streak isn't broken until today ends without a habit, so it may still run from yesterday.
+    var day = if (today in habitDays) today else today.minusDays(1)
+    var streak = 0
+    while (day in habitDays) {
+        streak++
+        day = day.minusDays(1)
+    }
+    val topBlocked = remember(blocked) {
+        blocked.groupingBy { it.pkg }.eachCount().entries.sortedByDescending { it.value }.take(3)
+            .joinToString(", ") { (pkg, n) -> "${InstalledApps.labelFor(context, pkg)} ${n}×" }
+    }
+
+    HFCard {
+        Text(
+            "Your habits · ${dayTitle(date)}",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Gap(8)
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            InlineStat(habits.toString(), "Habits done", Modifier.weight(1f))
+            InlineStat(blocked.size.toString(), "Times blocked", Modifier.weight(1f))
+            InlineStat(formatDuration(unlockMs), "Unlocked", Modifier.weight(1f))
+        }
+        if (topBlocked.isNotEmpty()) {
+            Gap(10)
+            Text(
+                "Most tried: $topBlocked",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Gap(6)
+        Text(
+            when (streak) {
+                0 -> "No habit streak yet"
+                1 -> "1 day in a row with a habit done"
+                else -> "$streak days in a row with a habit done"
+            },
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** A number and its label inside a card ([BigStat] is a card of its own). */
+@Composable
+private fun InlineStat(value: String, label: String, modifier: Modifier = Modifier) {
+    Column(modifier) {
+        Text(value, style = MaterialTheme.typography.titleLarge, maxLines = 1)
+        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
 
 private fun dayTitle(date: LocalDate): String = when (date) {
     LocalDate.now() -> "Today"
