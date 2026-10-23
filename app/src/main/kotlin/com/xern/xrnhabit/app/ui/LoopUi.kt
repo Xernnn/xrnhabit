@@ -121,6 +121,8 @@ fun LoopHabitPickerDialog(
 fun LoopLinkedRow(
     name: String,
     done: Boolean?,
+    /** Ticked, but that tick already opened the block (I24). */
+    used: Boolean = false,
     yesterday: Boolean,
     onYesterdayChange: ((Boolean) -> Unit)?,
     /** Null hides the goal choice: for an every-day habit "goal met" and "ticked" are the same. */
@@ -144,6 +146,7 @@ fun LoopLinkedRow(
             Text(
                 when {
                     done == true -> if (goal == true) "Goal met in xrnloops $day" else "Done in xrnloops $day"
+                    used -> "Done in xrnloops $day · that tick already opened this block"
                     goal == true -> "xrnloops habit · counts when its goal is met $day"
                     done == false && yesterday -> "xrnloops habit · needs yesterday's tick"
                     done == false -> "xrnloops habit · tick it there"

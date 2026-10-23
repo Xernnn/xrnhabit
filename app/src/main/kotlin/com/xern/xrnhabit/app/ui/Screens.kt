@@ -510,6 +510,7 @@ fun BlockDetailScreen(
                             LoopLinkedRow(
                                 name = item.text,
                                 done = item.done,
+                                used = item.tickSpent(),
                                 yesterday = item.linkedDay == LinkedDay.YESTERDAY,
                                 onYesterdayChange = if (editable) ({ yesterday ->
                                     loosening("Change which day counts?", "A different day's tick will unlock this block.") {

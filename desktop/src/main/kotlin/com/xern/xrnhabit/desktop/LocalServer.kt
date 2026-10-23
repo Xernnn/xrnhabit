@@ -251,7 +251,8 @@ class LocalServer(
     // ---- view ----------------------------------------------------------------------------
 
     @Serializable
-    data class UiItem(val id: String, val text: String, val done: Boolean, val linked: Boolean, val yesterday: Boolean)
+    /** [used]: a linked item whose tick already opened the block (I24). */
+    data class UiItem(val id: String, val text: String, val done: Boolean, val linked: Boolean, val yesterday: Boolean, val used: Boolean = false)
 
     @Serializable
     data class UiBlock(
@@ -370,7 +371,7 @@ class LocalServer(
             allowanceUsedMs = if (b.mode == BlockMode.ALLOWANCE) engine.allowanceUsedMs(world, b, clock) else 0,
             timerMs = progress?.accumulatedMs ?: 0,
             timerRunning = progress?.timerRunning == true,
-            items = world.items(b.id).map { UiItem(it.id, it.text, it.done, it.externalHabitId != null, it.linkedDay.name == "YESTERDAY") },
+            items = world.items(b.id).map { UiItem(it.id, it.text, it.done, it.externalHabitId != null, it.linkedDay.name == "YESTERDAY", it.tickSpent()) },
             redeemRejection = if (b.state == BlockState.EARNED) engine.redeemRejection(world, b.id, clock)?.name else null,
             scheduleText = scheduleText,
             scheduleDays = days.sorted(),

@@ -199,18 +199,15 @@ class BlockerForegroundService : LifecycleService() {
             container.store.effects.collect { effect -> onEffect(effect, container.store.world.value) }
         }
 
-        // 6. while a block screen is up, hear about the laptop and the web app within seconds:
-        //    a long-poll on the shared state, and a fresh read of xrnloops for linked items
+        // 6. while a block screen is up, hear about the laptop and the web app within a second or
+        //    two: long-polls on the shared state and, through xrnloops, on habit ticks
         lifecycleScope.launch {
             overlay.visible.collectLatest { up ->
                 if (!up) return@collectLatest
                 // Scoped to this showing: both stop when the shield goes (collectLatest cancels).
                 coroutineScope {
                     launch { container.shared.watch() }
-                    while (true) {
-                        delay(SHIELD_LOOP_SYNC_MS)
-                        if (overlay.showsLinkedItem) container.loop.sync()
-                    }
+                    container.loop.watch { overlay.showsLinkedItem }
                 }
             }
         }
@@ -346,9 +343,6 @@ class BlockerForegroundService : LifecycleService() {
     companion object {
         /** How long sync may fail before the "not syncing" alert. */
         private const val SYNC_ALERT_MS = 60 * 60 * 1000L
-
-        /** How often a block screen showing an xrnloops item re-reads it (and xrnloops its server). */
-        private const val SHIELD_LOOP_SYNC_MS = 15_000L
 
         /**
          * Android 12+ refuses foreground-service starts from a process that came up in the

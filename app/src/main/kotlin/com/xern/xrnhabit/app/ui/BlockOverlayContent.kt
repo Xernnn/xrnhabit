@@ -198,6 +198,7 @@ private fun ChecklistItemsSection(
             LoopItemRow(
                 text = item.text,
                 done = item.done,
+                used = item.tickSpent(),
                 yesterday = item.linkedDay == LinkedDay.YESTERDAY,
                 accentContent = accentContent,
                 onOpenLoop = onOpenLoop?.let { open -> { open(habitId) } },
@@ -298,11 +299,13 @@ private fun EarnedActions(blockId: String, unlockMin: Long, ui: OverlayShieldPor
 /**
  * A checklist row linked to a Loop habit (I23). It can't be checked here — only a tick in Loop
  * counts — so tapping it opens Loop instead. [yesterday]: the item counts yesterday's tick.
+ * [used]: it is ticked, but that tick already opened this block (I24), so it doesn't count again.
  */
 @Composable
 private fun LoopItemRow(
     text: String,
     done: Boolean,
+    used: Boolean,
     yesterday: Boolean,
     accentContent: androidx.compose.ui.graphics.Color,
     onOpenLoop: (() -> Unit)?,
@@ -310,7 +313,7 @@ private fun LoopItemRow(
     Row(
         Modifier
             .fillMaxWidth()
-            .then(if (!done && onOpenLoop != null) Modifier.clickable(onClick = onOpenLoop) else Modifier)
+            .then(if (!done && !used && onOpenLoop != null) Modifier.clickable(onClick = onOpenLoop) else Modifier)
             .padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -323,7 +326,7 @@ private fun LoopItemRow(
                 trackColor = MaterialTheme.colorScheme.surfaceVariant,
             )
             Icon(
-                if (done) Icons.Filled.Check else Icons.Filled.Link,
+                if (done || used) Icons.Filled.Check else Icons.Filled.Link,
                 contentDescription = null,
                 tint = if (done) accentContent else MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.size(18.dp),
@@ -340,6 +343,8 @@ private fun LoopItemRow(
                 when {
                     done && yesterday -> "Done in xrnloops yesterday"
                     done -> "Done in xrnloops"
+                    used && yesterday -> "Done yesterday · that tick already opened this block"
+                    used -> "Done · that tick already opened this block today"
                     yesterday && onOpenLoop != null -> "Needs yesterday's tick in xrnloops · tap to open"
                     yesterday -> "Needs yesterday's tick in xrnloops"
                     onOpenLoop != null -> "Tick it in xrnloops · tap to open"

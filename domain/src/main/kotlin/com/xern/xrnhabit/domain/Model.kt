@@ -158,9 +158,22 @@ data class ChecklistItem(
      * tick of their own (I23).
      */
     val countsGoal: Boolean = false,
-    /** Local epoch day this linked item's tick last paid for an unlock; kept across resets (I24). */
+    /**
+     * The tracker's day (epoch day) of the tick that last paid for an unlock; kept across
+     * resets (I24). A tracker day, like [tickEpochDay], not necessarily today's date.
+     */
     val spentEpochDay: Long? = null,
-)
+    /**
+     * Linked items only: the tracker's day (epoch day) of the tick it last reported for this
+     * item ([linkedDay] picks today's or yesterday's), null while it reports none (I23). Stays
+     * set when that tick has already paid ([spentEpochDay] equal), so the app can say so instead
+     * of showing an unticked habit. Device-local, like [done].
+     */
+    val tickEpochDay: Long? = null,
+) {
+    /** A linked item ticked in the tracker whose tick already opened its block (I24): used, not unticked. */
+    fun tickSpent(): Boolean = externalHabitId != null && !done && tickEpochDay != null && tickEpochDay == spentEpochDay
+}
 
 @Serializable
 data class HabitProgress(

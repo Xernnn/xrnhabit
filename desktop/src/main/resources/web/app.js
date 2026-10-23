@@ -163,9 +163,11 @@ function blockCard(b) {
         b.timerRunning && !onBlockPage && h("span", { class: "note" }, "It counts while you wait on this block's block page."))),
     b.items.length > 0 && b.mode === "HABIT" && h("div", { class: "items" }, b.items.map((i) =>
       h("label", {},
-        h("input", { type: "checkbox", checked: i.done, disabled: i.linked || !manualOpen, onchange: (e) => act({ type: "toggle", itemId: i.id, done: e.target.checked }) }),
+        h("input", { type: "checkbox", checked: i.done || i.used, disabled: i.linked || !manualOpen, onchange: (e) => act({ type: "toggle", itemId: i.id, done: e.target.checked }) }),
         i.text,
-        i.linked && h("span", { class: "linked" }, state.habitsUrl ? h("a", { href: state.habitsUrl, target: "_blank" }, i.yesterday ? "tick it in Habits (yesterday)" : "tick it in Habits") : "ticked in xrnloops")))),
+        i.linked && (i.used
+          ? h("span", { class: "linked" }, i.yesterday ? "done yesterday; that tick already opened this block" : "done; that tick already opened this block today")
+          : h("span", { class: "linked" }, state.habitsUrl ? h("a", { href: state.habitsUrl, target: "_blank" }, i.yesterday ? "tick it in Habits (yesterday)" : "tick it in Habits") : "ticked in xrnloops"))))),
     how(b) && h("div", { class: "how" }, how(b)),
     h("div", { class: "targets" },
       b.phoneApps > 0 && h("span", { class: "target" }, `${b.phoneApps} phone app${b.phoneApps === 1 ? "" : "s"}`),

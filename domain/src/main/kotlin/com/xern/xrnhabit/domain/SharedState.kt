@@ -8,7 +8,7 @@ import kotlinx.serialization.Serializable
  *
  * Only wall-clock times cross devices. [of] zeroes every monotonic stamp and
  * [BlockEvent.SharedStateMerged] anchors them again on arrival, as a cold start does (I8).
- * Not shared: a linked item's `done` (each device reads its own tracker), HABIT timer
+ * Not shared: a linked item's `done` and `tickEpochDay` (each device reads its own tracker), HABIT timer
  * progress, the foreground, the applied shield.
  */
 @Serializable
@@ -46,7 +46,7 @@ data class SharedState(
                 blocks = world.blocks.associate { it.id to it.copy(state = BlockState.ARMED) },
                 items = world.checklist.values.flatten().associate { item ->
                     item.id to if (item.externalHabitId != null) {
-                        item.copy(done = false, doneAtMonotonic = null)
+                        item.copy(done = false, doneAtMonotonic = null, tickEpochDay = null)
                     } else {
                         item.copy(doneAtMonotonic = null)
                     }
@@ -151,7 +151,7 @@ data class SharedState(
 
         /** Equal apart from the tick and the spent day, which merge on their own. */
         private fun sameConfig(a: ChecklistItem, b: ChecklistItem): Boolean =
-            a.copy(done = b.done, doneAtMonotonic = b.doneAtMonotonic, spentEpochDay = b.spentEpochDay) == b
+            a.copy(done = b.done, doneAtMonotonic = b.doneAtMonotonic, spentEpochDay = b.spentEpochDay, tickEpochDay = b.tickEpochDay) == b
 
         /** Per key: unchanged on one side takes the other; changed on both goes to [resolve]. */
         private fun <V> mergeMaps(

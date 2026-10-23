@@ -32,6 +32,10 @@ sealed interface BlockEvent {
      * it ([LinkedDay.YESTERDAY] items): the habits ticked that day, and the habits whose goal is
      * met that day ([ChecklistItem.countsGoal] items). Drives linked checklist items (I23, I24).
      * Never sent unless both days were read.
+     *
+     * The sets are for the tracker's own day, [trackerEpochDay], and the day before it. That is
+     * [epochDay] unless the tracker extends its day past midnight (Loop's "day starts at 3 am"),
+     * when it lags by one for those hours: a tick made then belongs to the tracker's day.
      */
     data class ExternalHabitsSynced(
         val epochDay: Long,
@@ -39,6 +43,7 @@ sealed interface BlockEvent {
         val doneYesterdayHabitIds: Set<String> = emptySet(),
         val goalMetHabitIds: Set<String> = emptySet(),
         val goalMetYesterdayHabitIds: Set<String> = emptySet(),
+        val trackerEpochDay: Long = epochDay,
     ) : BlockEvent
 
     /** Starts a break from SOFT blocks, at most once per local day (I25). */

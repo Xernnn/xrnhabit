@@ -725,6 +725,76 @@ class InvariantTests {
     }
 
     @Test
+    fun i24_spentTickIsStillKnownAsTicked() {
+        val clock = FakeClock()
+        var world = buildWorld(listOf(checklistBlock("c1")), mapOf("c1" to listOf(linkedItem("c1", "meditate"))), clock)
+        world = sync(world, clock, "meditate")
+        world = engine.reduce(world, BlockEvent.Redeem("c1"), clock).world
+        clock.advance(5L * 60_000)
+        world = engine.reduce(world, BlockEvent.Tick, clock).world
+
+        world = sync(world, clock, "meditate")
+
+        val item = world.items("c1").single()
+        assertFalse(item.done)
+        assertEquals("the app can say the tick paid already", item.spentEpochDay, item.tickEpochDay)
+        world = sync(world, clock) // unticked in the tracker
+        assertNull(world.items("c1").single().tickEpochDay)
+    }
+
+    /** Loop's "day starts at 3 am": at 01:00 its day is still yesterday's date. */
+    private fun syncLagging(world: World, clock: Clock, vararg done: String): World =
+        engine.reduce(world, BlockEvent.ExternalHabitsSynced(clock.epochDay(), done.toSet(), trackerEpochDay = clock.epochDay() - 1), clock).world
+
+    @Test
+    fun i23_tickAfterMidnightCountsForTheTrackersDay() {
+        val clock = FakeClock() // 12:00 UTC
+        var world = buildWorld(listOf(checklistBlock("c1")), mapOf("c1" to listOf(linkedItem("c1", "meditate"))), clock)
+        clock.advance(13L * 60 * 60_000) // 01:00 the next day; the tracker's day hasn't turned yet
+        world = engine.reduce(world, BlockEvent.Tick, clock).world
+
+        world = syncLagging(world, clock, "meditate")
+
+        assertEquals(BlockState.EARNED, world.block("c1")!!.state)
+        assertEquals(clock.epochDay() - 1, world.items("c1").single().tickEpochDay)
+    }
+
+    @Test
+    fun i24_eveningTickDoesNotPayAgainAfterMidnight() {
+        val clock = FakeClock() // 12:00 UTC
+        var world = buildWorld(listOf(checklistBlock("c1")), mapOf("c1" to listOf(linkedItem("c1", "meditate"))), clock)
+        clock.advance(10L * 60 * 60_000) // 22:00
+        world = sync(world, clock, "meditate")
+        world = engine.reduce(world, BlockEvent.Redeem("c1"), clock).world
+        val evening = clock.epochDay()
+        assertEquals(evening, world.items("c1").single().spentEpochDay)
+
+        clock.advance(3L * 60 * 60_000) // 01:00: a new date, but still the tracker's evening day
+        world = engine.reduce(world, BlockEvent.Tick, clock).world
+        world = syncLagging(world, clock, "meditate")
+        assertEquals("the same tick already paid", BlockState.ARMED, world.block("c1")!!.state)
+
+        clock.advance(3L * 60 * 60_000) // 04:00: the tracker's new day, and a new tick
+        world = sync(world, clock, "meditate")
+        assertEquals(BlockState.EARNED, world.block("c1")!!.state)
+    }
+
+    @Test
+    fun i24_yesterdayItemSpendsYesterdaysTick() {
+        val clock = FakeClock()
+        val item = linkedItem("c1", "journal", day = LinkedDay.YESTERDAY)
+        var world = buildWorld(listOf(checklistBlock("c1")), mapOf("c1" to listOf(item)), clock)
+        world = engine.reduce(world, BlockEvent.ExternalHabitsSynced(clock.epochDay(), emptySet(), doneYesterdayHabitIds = setOf("journal")), clock).world
+        world = engine.reduce(world, BlockEvent.Redeem("c1"), clock).world
+
+        assertEquals(clock.epochDay() - 1, world.items("c1").single().spentEpochDay)
+        clock.advance(24L * 60 * 60_000) // tomorrow, today's tick is the new "yesterday"
+        world = engine.reduce(world, BlockEvent.Tick, clock).world
+        world = engine.reduce(world, BlockEvent.ExternalHabitsSynced(clock.epochDay(), emptySet(), doneYesterdayHabitIds = setOf("journal")), clock).world
+        assertEquals(BlockState.EARNED, world.block("c1")!!.state)
+    }
+
+    @Test
     fun i25_pauseLiftsSoftBlocksOnly() {
         val clock = FakeClock()
         val soft = checklistBlock("soft", target = "com.soft")

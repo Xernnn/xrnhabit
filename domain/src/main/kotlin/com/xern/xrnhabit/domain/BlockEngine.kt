@@ -298,9 +298,9 @@ class BlockEngine {
 
     /**
      * I23: linked items mirror the external tracker — ticked iff that habit is done on the item's
-     * [LinkedDay] and no tick has already paid for an unlock today (I24). Only ARMED HABIT blocks
-     * listen, as with a manual toggle (I12). A snapshot for any other day raced midnight and is
-     * dropped.
+     * [LinkedDay] (by the tracker's own day) and that day's tick hasn't already paid for an
+     * unlock (I24). Only ARMED HABIT blocks listen, as with a manual toggle (I12). A snapshot for
+     * any other day raced midnight and is dropped.
      */
     private fun onExternalHabitsSynced(
         world: World,
@@ -317,15 +317,16 @@ class BlockEngine {
             if (items.none { it.externalHabitId != null }) continue
             val updated = items.map { item ->
                 val habitId = item.externalHabitId ?: return@map item
-                val ticked = when (item.linkedDay) {
-                    LinkedDay.TODAY -> if (item.countsGoal) event.goalMetHabitIds else event.doneHabitIds
-                    LinkedDay.YESTERDAY -> if (item.countsGoal) event.goalMetYesterdayHabitIds else event.doneYesterdayHabitIds
+                val (ticked, day) = when (item.linkedDay) {
+                    LinkedDay.TODAY -> (if (item.countsGoal) event.goalMetHabitIds else event.doneHabitIds) to event.trackerEpochDay
+                    LinkedDay.YESTERDAY -> (if (item.countsGoal) event.goalMetYesterdayHabitIds else event.doneYesterdayHabitIds) to event.trackerEpochDay - 1
                 }
-                val done = habitId in ticked && item.spentEpochDay != today
+                val tickDay = day.takeIf { habitId in ticked }
+                val done = tickDay != null && item.spentEpochDay != tickDay
                 when {
-                    done == item.done -> item
-                    done -> item.copy(done = true, doneAtMonotonic = clock.nowMonotonicMs())
-                    else -> item.copy(done = false, doneAtMonotonic = null)
+                    done == item.done && tickDay == item.tickEpochDay -> item
+                    done -> item.copy(done = true, doneAtMonotonic = item.doneAtMonotonic ?: clock.nowMonotonicMs(), tickEpochDay = tickDay)
+                    else -> item.copy(done = false, doneAtMonotonic = null, tickEpochDay = tickDay)
                 }
             }
             w = w.copy(checklist = w.checklist + (block.id to updated))
@@ -365,9 +366,7 @@ class BlockEngine {
         val checklist = if (items.none { it.externalHabitId != null && it.done }) {
             world.checklist
         } else {
-            world.checklist + (blockId to items.map { item ->
-                if (item.externalHabitId != null && item.done) item.copy(spentEpochDay = epochDay) else item
-            })
+            world.checklist + (blockId to items.map { spendTick(it, epochDay) })
         }
         return world.copy(
             blocks = world.blocks.replace(blockId) { it.copy(state = BlockState.UNLOCKED) },
@@ -542,7 +541,8 @@ class BlockEngine {
                     val local = mine[item.id]
                     when {
                         // A linked item's tick comes from this device's own tracker read (§2.4).
-                        item.externalHabitId != null -> item.copy(done = local?.done == true, doneAtMonotonic = local?.doneAtMonotonic)
+                        item.externalHabitId != null ->
+                            item.copy(done = local?.done == true, doneAtMonotonic = local?.doneAtMonotonic, tickEpochDay = local?.tickEpochDay)
                         local != null && local.done == item.done -> item.copy(doneAtMonotonic = local.doneAtMonotonic)
                         else -> item.copy(doneAtMonotonic = if (item.done) nowMono else null)
                     }
@@ -565,7 +565,7 @@ class BlockEngine {
                 progress[b.id] = freshProgress(b.id, clock)
                 checklist[b.id] = resetItems(items)
             } else if (before != BlockState.UNLOCKED && state == BlockState.UNLOCKED) { // I24, as onRedeem
-                checklist[b.id] = items.map { if (it.externalHabitId != null && it.done) it.copy(spentEpochDay = today) else it }
+                checklist[b.id] = items.map { spendTick(it, today) }
             }
             b.copy(state = state)
         }
@@ -632,8 +632,16 @@ class BlockEngine {
         timerRunning = false,
     )
 
+    /** I10. A linked item keeps [ChecklistItem.tickEpochDay]: the tracker still has that tick. */
     private fun resetItems(items: List<ChecklistItem>): List<ChecklistItem> =
         items.map { it.copy(done = false, doneAtMonotonic = null) }
+
+    /**
+     * I24: a linked item's tick that is done now pays for an unlock; it's marked by its own day
+     * ([today] for an item ticked before items knew their tick's day).
+     */
+    private fun spendTick(item: ChecklistItem, today: Long): ChecklistItem =
+        if (item.externalHabitId != null && item.done) item.copy(spentEpochDay = item.tickEpochDay ?: today) else item
 
     private fun dayRolled(progress: HabitProgress?, clock: Clock): Boolean {
         progress ?: return false

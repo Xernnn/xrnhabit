@@ -5,6 +5,7 @@ import com.xern.xrnhabit.desktop.BlockForms.LinkedHabit
 import com.xern.xrnhabit.domain.BlockEngine
 import com.xern.xrnhabit.domain.BlockEvent
 import com.xern.xrnhabit.domain.BlockState
+import com.xern.xrnhabit.domain.Clock
 import com.xern.xrnhabit.domain.PersistPort
 import com.xern.xrnhabit.domain.World
 import kotlinx.coroutines.CoroutineScope
@@ -23,6 +24,7 @@ import java.net.ServerSocket
 import java.net.URI
 import java.nio.file.Files
 import java.time.LocalDate
+import java.time.ZoneId
 import java.util.Base64
 
 /**
@@ -82,12 +84,20 @@ class EndToEndTest {
         dir.deleteRecursively()
     }
 
-    private fun device(name: String): Device {
+    /** The real clock, moved to [hour] o'clock local time today. */
+    private class ShiftedClock(hour: Int) : Clock {
+        private val shift = LocalDate.now().atTime(hour, 0).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli() - System.currentTimeMillis()
+        override fun nowMonotonicMs() = System.nanoTime() / 1_000_000
+        override fun nowWallMs() = System.currentTimeMillis() + shift
+        override fun zone(): ZoneId = ZoneId.systemDefault()
+    }
+
+    private fun device(name: String, clock: Clock = DesktopClock()): Device {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default).also { scopes += it }
         val data = File(dir, name).apply { mkdirs() }
         val config = Config(server = "", user = "you", password = "pw", port = 0, dataDir = data, habitUrl = habitUrl, loopUrl = loopUrl)
         val telemetry = FileTelemetry(File(data, "telemetry.log"))
-        val store = Store(BlockEngine(), NoPersist, DesktopClock(), scope, telemetry)
+        val store = Store(BlockEngine(), NoPersist, clock, scope, telemetry)
         SharedSyncClient(config, store, telemetry, scope).start()
         LoopClient(config, store, scope).start()
         return Device(store)
@@ -144,5 +154,28 @@ class EndToEndTest {
         // A deletes it; it's gone from B too.
         runBlocking { a.store.edit { w -> BlockForms.delete(w, id) } }
         await("B lost the block") { b.store.world.value.block(id) == null }
+    }
+
+    @Test
+    fun withThePhonesDayStartingAt3AnOneAmTickCountsForTheDayBefore() {
+        val now = System.currentTimeMillis()
+        postHabits(
+            """{"habits":[{"uuid":"plank","mtime":$now,"deleted":false,"data":{"name":"Plank","freqNum":1,"freqDen":1,"type":0}}],"entries":[]}""",
+        )
+        postHabits("""{"dayStartHour":3,"habits":[],"entries":[]}""") // what xrnloops sends with "Extend the day" on
+        val laptop = device("laptop", ShiftedClock(hour = 1))
+        runBlocking {
+            laptop.store.edit { w ->
+                (BlockForms.create(w, Form(name = "Games", sites = listOf("example.com"), linked = listOf(LinkedHabit("plank", "Plank"))), laptop.store.clock) as BlockForms.Result.Ok).world
+            }
+        }
+        val id = laptop.store.world.value.blocks.single().id
+        val yesterday = LocalDate.now().minusDays(1)
+
+        // At 1 am the phone's "today" is still yesterday's date, and its tick lands there.
+        postHabits("""{"habits":[],"entries":[{"habit":"plank","date":"$yesterday","value":2,"notes":"","mtime":${now + 1}}]}""")
+
+        await("earned by the 1 am tick") { laptop.store.world.value.block(id)?.state == BlockState.EARNED }
+        assertEquals(yesterday.toEpochDay(), laptop.store.world.value.items(id).single().tickEpochDay)
     }
 }

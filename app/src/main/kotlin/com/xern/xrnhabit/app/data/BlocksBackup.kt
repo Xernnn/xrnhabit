@@ -57,5 +57,5 @@ object BlocksBackups {
         return imported to added.size
     }
 
-    private fun fresh(item: ChecklistItem) = item.copy(done = false, doneAtMonotonic = null, spentEpochDay = null)
+    private fun fresh(item: ChecklistItem) = item.copy(done = false, doneAtMonotonic = null, spentEpochDay = null, tickEpochDay = null)
 }

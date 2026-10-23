@@ -3,7 +3,6 @@ package com.xern.xrnhabit.desktop
 import com.xern.xrnhabit.domain.BlockEvent
 import com.xern.xrnhabit.domain.SharedState
 import com.xern.xrnhabit.domain.epochDay
-import com.xern.xrnhabit.domain.localDate
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
@@ -19,6 +18,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -30,6 +30,8 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.time.Duration
+import java.time.Instant
+import java.time.LocalDate
 import java.util.Base64
 
 /** How the last attempt went, for the local page. */
@@ -193,8 +195,12 @@ class SharedSyncClient(
 /**
  * Habit ticks for linked checklist items (I23), from xrnloops-sync's `/api/status` rather than
  * the phone's content provider: today and yesterday, the same four sets `LoopHabits` builds on
- * the phone. Re-read when the habit feed moves (a long-poll), at local midnight, and when an
- * item gets linked. Nothing is sent unless both days were read.
+ * the phone. Re-read when the habit feed moves (a long-poll), at local midnight and when
+ * xrnloops' own day turns, and when an item gets linked. Nothing is sent unless both days were
+ * read.
+ *
+ * "Today" is xrnloops' day: with its "Extend the day past midnight" on, the phone reports that
+ * its day starts at 3 am (`dayStartHour`), and until then a tick belongs to the day before.
  */
 class LoopClient(
     private val config: Config,
@@ -206,12 +212,20 @@ class LoopClient(
     val status: StateFlow<SyncStatus?> = _status.asStateFlow()
     private val kicks = Channel<Unit>(Channel.CONFLATED)
 
+    /** The hour xrnloops' day starts, as the server last said. */
+    @Volatile
+    private var dayStartHour = 0
+
     /** Read the habits again now: an item was just linked. */
     fun kick() {
         kicks.trySend(Unit)
     }
 
     private fun anyLinked() = store.world.value.checklist.values.any { items -> items.any { it.externalHabitId != null } }
+
+    /** xrnloops' today: until its day-start hour it's still the day before. */
+    private fun loopDay(hour: Int = dayStartHour): LocalDate =
+        Instant.ofEpochMilli(store.clock.nowWallMs()).atZone(store.clock.zone()).minusHours(hour.toLong()).toLocalDate()
 
     fun start() {
         if (!config.syncConfigured) return
@@ -221,6 +235,7 @@ class LoopClient(
         scope.launch(Dispatchers.IO) {
             var seq = -1L
             var day = store.clock.epochDay()
+            var tracked = loopDay()
             while (true) {
                 try {
                     if (!anyLinked()) {
@@ -229,12 +244,14 @@ class LoopClient(
                     }
                     seq = read()
                     day = store.clock.epochDay()
+                    tracked = loopDay()
                     // Wait for a change in the feed, a new day, or a kick (the long-poll ends every 50 s).
-                    while (store.clock.epochDay() == day && kicks.tryReceive().isFailure) {
+                    while (store.clock.epochDay() == day && loopDay() == tracked && kicks.tryReceive().isFailure) {
                         val r = http.send("${config.loopUrl}/api/changes?since=$seq&wait=50", timeoutS = 65)
                         check(r.statusCode() == 200) { "server answered ${r.statusCode()}" }
                         val page = json.parseToJsonElement(r.body()).jsonObject
                         if (page["habits"]!!.jsonArray.isNotEmpty() || page["entries"]!!.jsonArray.isNotEmpty()) break
+                        if ((page["dayStartHour"]?.jsonPrimitive?.int ?: 0) != dayStartHour) break
                         seq = page["seq"]!!.jsonPrimitive.long
                     }
                 } catch (e: Exception) {
@@ -247,34 +264,44 @@ class LoopClient(
 
     /** Reads both days and dispatches them; returns the feed position to wait from. */
     private suspend fun read(): Long {
-        val today = store.clock.localDate()
-        val (seq, todays) = status(today.toString())
-        val (_, yesterdays) = status(today.minusDays(1).toString())
+        var loopDay = loopDay()
+        var (seq, todays, hour) = status(loopDay.toString())
+        if (hour != dayStartHour) { // the phone changed when its day starts: that was the wrong date
+            dayStartHour = hour
+            loopDay = loopDay(hour)
+            val again = status(loopDay.toString())
+            seq = again.seq
+            todays = again.habits
+        }
+        val yesterdays = status(loopDay.minusDays(1).toString()).habits
         fun ids(habits: List<JsonObject>, key: String) =
             habits.filter { it[key]!!.jsonPrimitive.boolean }.map { it["uuid"]!!.jsonPrimitive.content }.toSet()
         store.dispatchAndGet(
             BlockEvent.ExternalHabitsSynced(
-                epochDay = today.toEpochDay(),
+                epochDay = store.clock.epochDay(),
                 doneHabitIds = ids(todays, "done"),
                 doneYesterdayHabitIds = ids(yesterdays, "done"),
                 goalMetHabitIds = ids(todays, "goal_met"),
                 goalMetYesterdayHabitIds = ids(yesterdays, "goal_met"),
+                trackerEpochDay = loopDay.toEpochDay(),
             ),
         )
         _status.value = SyncStatus(System.currentTimeMillis(), true, "Read ${todays.size} habits")
         return seq
     }
 
-    private fun status(date: String): Pair<Long, List<JsonObject>> {
+    private data class DayStatus(val seq: Long, val habits: List<JsonObject>, val dayStartHour: Int)
+
+    private fun status(date: String): DayStatus {
         val r = http.send("${config.loopUrl}/api/status?date=$date")
         check(r.statusCode() == 200) { "server answered ${r.statusCode()}" }
         val body = json.parseToJsonElement(r.body()).jsonObject
         val habits = body["habits"]!!.jsonArray.map { it.jsonObject }.filter { it["countable"]?.jsonPrimitive?.boolean != false }
-        return body["seq"]!!.jsonPrimitive.long to habits
+        return DayStatus(body["seq"]!!.jsonPrimitive.long, habits, body["dayStartHour"]?.jsonPrimitive?.int ?: 0)
     }
 
     /** All habits, for linking checklist items on the local page. */
-    fun habits(): List<JsonObject> = status(store.clock.localDate().toString()).second
+    fun habits(): List<JsonObject> = status(loopDay().toString()).habits
 }
 
 fun describe(e: Exception): String = when (e) {
